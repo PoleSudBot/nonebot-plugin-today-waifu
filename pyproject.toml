@@ -14,9 +14,7 @@ repository = "https://github.com/glamorgan9826/nonebot-plugin-today-waifu"
 dependencies = [
     "nonebot2[fastapi] (>=2.4.2,<3.0.0)",
     "nonebot-adapter-onebot (>=2.4.6,<3.0.0)",
-    "httpx (>=0.28.1,<0.29.0)",
     "nonebot-plugin-uninfo (>=0.7.3,<0.8.0)",
-    "nonebot-plugin-alconna (>=0.57.6,<0.58.0)"
 ]
 
 

@@ -1,11 +1,11 @@
+from collections.abc import Callable
 import datetime
 from functools import wraps
-from typing import Callable, Set
+from typing import Any, TypeVar, cast
 
 from nonebot.internal.rule import Rule
-
 from nonebot_plugin_alconna import UniMessage
-from nonebot_plugin_uninfo import Uninfo, Interface
+from nonebot_plugin_uninfo import Interface, Uninfo
 
 
 def check_not_private(session: Uninfo) -> bool:
@@ -15,7 +15,7 @@ def check_not_private(session: Uninfo) -> bool:
 NOT_PRIVATE = Rule(check_not_private)
 
 
-async def get_scene_members(session: Uninfo, interface: Interface) -> Set[str]:
+async def get_scene_members(session: Uninfo, interface: Interface) -> set[str]:
     """
     获取群成员列表
     :param session:
@@ -23,16 +23,20 @@ async def get_scene_members(session: Uninfo, interface: Interface) -> Set[str]:
     :return:
     """
     members = await interface.get_members(session.scene.type, session.scene.id)
-    return set(i.id for i in members)
+    return {i.id for i in members}
 
 
-async def construct_message(session: Uninfo, interface: Interface, message: str, waifu_id: str = None) -> UniMessage:
+async def construct_message(
+    session: Uninfo, interface: Interface, message: str, waifu_id: str | None = None
+) -> UniMessage:
     if waifu_id is None:
         return UniMessage.text(message)
     if not isinstance(interface, Interface):
         return UniMessage.text(f"[用户({waifu_id})信息获取失败]" + message)
     try:
-        waifu = await interface.get_member(session.scene.type, session.scene.id, waifu_id)
+        waifu = await interface.get_member(
+            session.scene.type, session.scene.id, waifu_id
+        )
     except Exception:
         waifu = None
     if not waifu:
@@ -42,19 +46,28 @@ async def construct_message(session: Uninfo, interface: Interface, message: str,
     avatar = UniMessage.image(url=waifu.user.avatar)
     msg = UniMessage.text(message) + avatar
     if waifu_id != session.self_id:
-        member_name = waifu.nick or waifu.user.nick or waifu.user.name or waifu.user.id or waifu_id
+        member_name = (
+            waifu.nick
+            or waifu.user.nick
+            or waifu.user.name
+            or waifu.user.id
+            or waifu_id
+        )
         msg = msg + UniMessage.text(f"{member_name}({waifu_id})")
     return msg
 
 
-def auto_save(func: Callable):
+F = TypeVar("F", bound=Callable[..., Any])
+
+
+def auto_save(func: F) -> F:
     @wraps(func)
     def wrapper(self, *args, **kwargs):
         result = func(self, *args, **kwargs)
         self.save()
         return result
 
-    return wrapper
+    return cast(F, wrapper)
 
 
 def get_today() -> str:

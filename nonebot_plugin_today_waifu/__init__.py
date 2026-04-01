@@ -1,363 +1,141 @@
-import re
-from typing import Any, Dict
+from __future__ import annotations
 
-import nonebot
-from nonebot import on_regex, require
-from nonebot.drivers.websockets import logger
+import os
+import sys
+
+from nonebot import get_driver, on_type, require
+from nonebot.adapters import Bot, Event
+from nonebot.adapters.onebot.v11 import (
+    GroupDecreaseNoticeEvent,
+    GroupIncreaseNoticeEvent,
+)
 from nonebot.message import event_postprocessor
-from nonebot.params import RegexDict
-from nonebot.permission import SUPERUSER
-from nonebot.plugin import PluginMetadata, get_plugin_config, inherit_supported_adapters
+from nonebot.plugin import PluginMetadata, inherit_supported_adapters
 
+from .bootstrap import inject_orm_database_url
+from .config import Config
+from .constants import ReportBucket
+from .render.runtime import close_theme_card_client
+from .texts import HELP_TEXT
+
+_TEST_MODE = bool(os.environ.get("PYTEST_CURRENT_TEST")) or "pytest" in sys.modules
+
+inject_orm_database_url()
+
+require("nonebot_plugin_orm")
+if not _TEST_MODE:
+    require("nonebot_plugin_htmlrender")
+require("nonebot_plugin_apscheduler")
 require("nonebot_plugin_alconna")
 require("nonebot_plugin_uninfo")
 
-from nonebot_plugin_alconna import UniMessage
-from nonebot_plugin_uninfo import ADMIN, GROUP, QryItrface, Uninfo
+from nonebot_plugin_apscheduler import scheduler
+from nonebot_plugin_uninfo import Uninfo
 
-from .config import Config
-from .record import SceneManager, SceneRecord
-from .utils import NOT_PRIVATE
-
-__plugin_name__ = "今日老婆"
-
-__plugin_usage__ = """
-## 💍 群内抽老婆
-
-- **今日老婆** - 随机抽取群友作为老婆
-- **换老婆** - 重新抽取老婆
-- **今日老婆信息** - 查看本群今日老婆信息
-
-## ⚙️ 管理选项
-
-- **开启换老婆** / **关闭换老婆** - 允许/禁止换老婆 [仅管理/超管]
-- **设置换老婆次数 [N]** - 自定义换老婆最大次数 [仅管理/超管]
-- **开启自动撤回** / **关闭自动撤回** - 允许/禁止消息自动撤回 [仅管理/超管]
-- **设置自动撤回延迟 [N]** - 自动撤回延迟时间 [仅管理/超管]
-- **开启自动设置对方老婆** / **关闭自动设置对方老婆** - 自动双向绑定老婆 [仅管理/超管]
-- **设置抽取模式 [随机模式/活跃模式]** - 抽取模式 [仅管理/超管]
-- **设置活跃天数 [N]** - 设置活跃天数 [仅管理/超管]
-""".strip()
-
-__plugin_version__ = "0.1.10"
-
+from . import commands, migrations
+from .config import plugin_config
+from .services import waifu_service
 
 __plugin_meta__ = PluginMetadata(
-    name=__plugin_name__,
-    description="随机抽取群友作为老婆吧！",
-    usage=__plugin_usage__,
+    name="今日老婆",
+    description="随机抽群友当老婆，还支持纯爱、主题卡面和缘分刊物。",
+    usage=HELP_TEXT,
     type="application",
     config=Config,
     homepage="https://github.com/glamorgan9826/nonebot-plugin-today-waifu",
     supported_adapters=inherit_supported_adapters(
-        "nonebot_plugin_alconna", "nonebot_plugin_uninfo"
+        "nonebot_plugin_alconna",
+        "nonebot_plugin_uninfo",
     ),
     extra={
-        "author": "glamorgan9826",
-        "version": __plugin_version__,
-        "menu_type": "功能",
+        "author": "k1yuyu",
+        "version": "0.2.0",
     },
 )
 
-driver = nonebot.get_driver()
-plugin_config = get_plugin_config(Config)
-
-if plugin_config.today_waifu_superuser_opt:
-    permission_opt = SUPERUSER
-else:
-    permission_opt = SUPERUSER | ADMIN()
-
-# 正则匹配插件名与别名的字符串
-PatternStr = "|".join(
-    [
-        __plugin_name__,
-    ]
-    + plugin_config.today_waifu_aliases
-)
+driver = get_driver()
 
 
 @event_postprocessor
-async def _log_active_user(session: Uninfo):
-    if (
-        session.scene
-        and session.user
-        and session.user.id
-        and not session.scene.is_private
-    ):
-        scene_record: SceneRecord = SceneManager().get_scene(
-            session.scene
-        )  # 获取场景记录
-        scene_record.log_speak_record(session.user.id)  # 记录群友发言
+async def _track_group_activity(event: Event, session: Uninfo):
+    if event.get_type() != "message":
+        return
+    await waifu_service.track_message_activity(session)
 
 
-# 响应器主体
-today_waifu = on_regex(
-    pattern=rf"^\s*({PatternStr})\s*$",
-    flags=re.S,
-    permission=GROUP | SUPERUSER,
-    rule=NOT_PRIVATE,
-    priority=7,
-    block=True,
-)
+group_member_increase = on_type(GroupIncreaseNoticeEvent, priority=1, block=False)
+group_member_decrease = on_type(GroupDecreaseNoticeEvent, priority=1, block=False)
 
-# 刷新所在群全部记录
-today_waifu_refresh = on_regex(
-    rf"^\s*(刷新|重置)(?P<name>{PatternStr})\s*$",
-    permission=SUPERUSER,
-    rule=NOT_PRIVATE,
-    priority=7,
-    block=True,
-)
 
-# 换老婆
-today_waifu_change = on_regex(
-    pattern=r"^\s*换老婆\s*$",
-    flags=re.S,
-    permission=GROUP | SUPERUSER,
-    rule=NOT_PRIVATE,
-    priority=7,
-    block=True,
-)
+@group_member_increase.handle()
+async def _(bot: Bot, event: GroupIncreaseNoticeEvent):
+    await waifu_service.handle_member_join(bot, str(event.group_id), str(event.user_id))
 
-# 设置所在群换老婆最大次数
-today_waifu_set_limit_times = on_regex(
-    pattern=r"^\s*设置换老婆次数\s*(?P<times>\d+)\s*$",
-    permission=permission_opt,
-    rule=NOT_PRIVATE,
-    priority=7,
-    block=True,
-)
 
-today_waifu_set_allow_change = on_regex(
-    pattern=r"^\s*(?P<val>开启换老婆|关闭换老婆)\s*$",
-    permission=permission_opt,
-    rule=NOT_PRIVATE,
-    priority=7,
-    block=True,
-)
-
-today_waifu_set_withdraw_delay = on_regex(
-    pattern=r"^\s*设置自动撤回延迟\s*(?P<times>\d+)\s*$",
-    permission=permission_opt,
-    rule=NOT_PRIVATE,
-    priority=7,
-    block=True,
-)
-
-today_waifu_set_auto_withdraw = on_regex(
-    pattern=r"^\s*(?P<val>开启自动撤回|关闭自动撤回)\s*$",
-    permission=permission_opt,
-    rule=NOT_PRIVATE,
-    priority=7,
-    block=True,
-)
-
-today_waifu_set_auto_set_other_half = on_regex(
-    pattern=r"^\s*(?P<val>开启自动设置对方老婆|关闭自动设置对方老婆)\s*$",
-    permission=permission_opt,
-    rule=NOT_PRIVATE,
-    priority=7,
-    block=True,
-)
-
-today_waifu_set_select_mode = on_regex(
-    pattern=r"^\s*设置抽取模式\s*(?P<val>.+)$",
-    permission=permission_opt,
-    rule=NOT_PRIVATE,
-    priority=7,
-    block=True,
-)
-
-today_waifu_set_active_days = on_regex(
-    pattern=r"^\s*设置活跃天数\s*(?P<times>\d+)\s*$",
-    permission=permission_opt,
-    rule=NOT_PRIVATE,
-    priority=7,
-    block=True,
-)
-
-today_waifu_info = on_regex(
-    pattern=rf"^\s*({PatternStr})信息\s*$",
-    permission=permission_opt,
-    rule=NOT_PRIVATE,
-    priority=7,
-    block=True,
-)
-
-today_waifu_usage = on_regex(
-    pattern=rf"^\s*({PatternStr})帮助\s*$",
-    permission=permission_opt,
-    rule=NOT_PRIVATE,
-    priority=7,
-    block=True,
-)
+@group_member_decrease.handle()
+async def _(event: GroupDecreaseNoticeEvent):
+    await waifu_service.handle_member_leave(str(event.group_id), str(event.user_id))
 
 
 @driver.on_startup
-async def init() -> None:
-    SceneManager().load()
+async def _startup() -> None:
+    return None
 
 
-if plugin_config.today_waifu_group_member_cache:
-    logger.warning(
-        "今日老婆缓存已开启，注意：当前仅支持OneBot V11协议，其余协议请关闭today_waifu_group_member_cache选项"
-    )
-
-    from typing import Union
-
-    from nonebot.adapters.onebot.v11 import (
-        GroupDecreaseNoticeEvent,
-        GroupIncreaseNoticeEvent,
-    )
-    from nonebot.adapters.onebot.v11.permission import GROUP
-
-    @event_postprocessor
-    async def _group_member_monitor(
-        session: Uninfo,
-        interface: QryItrface,
-        event: GroupIncreaseNoticeEvent | GroupDecreaseNoticeEvent,
-    ):
-        scene_record: SceneRecord = SceneManager().get_scene(
-            session.scene
-        )  # 获取场景记录
-        if isinstance(event, GroupIncreaseNoticeEvent):
-            await scene_record.add_member(session.user.id, session, interface)
-        elif isinstance(event, GroupDecreaseNoticeEvent):
-            await scene_record.remove_member(session.user.id, session, interface)
+@driver.on_shutdown
+async def _shutdown() -> None:
+    await close_theme_card_client()
 
 
-@today_waifu_usage.handle()
-async def _():
-    await today_waifu_usage.finish(__plugin_usage__)
+@scheduler.scheduled_job(
+    "cron",
+    hour=plugin_config.today_waifu_member_refresh_hour,
+    minute=plugin_config.today_waifu_member_refresh_minute,
+    max_instances=1,
+    coalesce=True,
+)
+async def _nightly_member_refresh() -> None:
+    await waifu_service.refresh_member_cache_for_all_groups()
 
 
-@today_waifu_info.handle()
-async def _(session: Uninfo):
-    scene_record: SceneRecord = SceneManager().get_scene(session.scene)
-    await today_waifu_info.finish(scene_record.get_info())
+@scheduler.scheduled_job(
+    "cron",
+    day_of_week="sun",
+    hour=plugin_config.today_waifu_report_hour,
+    minute=plugin_config.today_waifu_report_minute,
+    max_instances=1,
+    coalesce=True,
+)
+async def _send_week_report() -> None:
+    await waifu_service.send_period_report(ReportBucket.WEEK)
 
 
-@today_waifu_set_withdraw_delay.handle()
-async def _(session: Uninfo, times: dict[str, Any] = RegexDict()):
-    delay: str = times.get(
-        "times", str(plugin_config.today_waifu_auto_withdraw_delay)
-    ).strip()
-    try:
-        delay_num = max(1, int(delay))
-    except ValueError:
-        await today_waifu_set_withdraw_delay.finish("延迟时间应为整数")
-    scene_record: SceneRecord = SceneManager().get_scene(session.scene)
-    scene_record.set_auto_withdraw_delay(delay_num)
-    await today_waifu_set_withdraw_delay.finish(
-        f"已将本群自动撤回延迟设置为{delay_num}秒"
-    )
+@scheduler.scheduled_job(
+    "cron",
+    day="last",
+    hour=plugin_config.today_waifu_report_hour,
+    minute=plugin_config.today_waifu_report_minute,
+    max_instances=1,
+    coalesce=True,
+)
+async def _send_month_report() -> None:
+    await waifu_service.send_period_report(ReportBucket.MONTH)
 
 
-@today_waifu_set_active_days.handle()
-async def _(session: Uninfo, times: dict[str, Any] = RegexDict()):
-    active_days: str = times.get(
-        "times", str(plugin_config.today_waifu_active_days)
-    ).strip()
-    try:
-        active_days_num = int(active_days)
-    except ValueError:
-        await today_waifu_set_active_days.finish("活跃天数应为整数")
-    scene_record: SceneRecord = SceneManager().get_scene(session.scene)
-    scene_record.set_active_days(active_days_num)
-    await today_waifu_set_active_days.finish(
-        f"已将本群活跃天数设置为{active_days_num}天"
-    )
+@scheduler.scheduled_job(
+    "cron",
+    month=12,
+    day=31,
+    hour=plugin_config.today_waifu_report_hour,
+    minute=plugin_config.today_waifu_report_minute,
+    max_instances=1,
+    coalesce=True,
+)
+async def _send_year_report() -> None:
+    await waifu_service.send_period_report(ReportBucket.YEAR)
 
 
-@today_waifu_set_select_mode.handle()
-async def _(session: Uninfo, val: dict[str, Any] = RegexDict()):
-    scene_record: SceneRecord = SceneManager().get_scene(session.scene)
-    val: str = val.get("val", "").strip()
-    if "随机" in val:
-        val = "随机模式"
-        scene_record.set_select_mode("random")
-    elif "活跃" in val:
-        val = "活跃模式"
-        scene_record.set_select_mode("active")
-    await today_waifu_set_select_mode.finish(f"本群设置为{val}模式")
-
-
-@today_waifu_set_allow_change.handle()
-async def _(session: Uninfo, val: dict[str, Any] = RegexDict()):
-    scene_record: SceneRecord = SceneManager().get_scene(session.scene)
-    val: str = val.get("val", "").strip()
-    if val == "开启换老婆":
-        scene_record.set_allow_change_waifu(True)
-    elif val == "关闭换老婆":
-        scene_record.set_allow_change_waifu(False)
-    else:
-        await today_waifu_set_allow_change.finish()
-    await today_waifu_set_allow_change.finish(f"本群设置为{val}")
-
-
-@today_waifu_set_auto_withdraw.handle()
-async def _(session: Uninfo, val: dict[str, Any] = RegexDict()):
-    scene_record: SceneRecord = SceneManager().get_scene(session.scene)
-    val: str = val.get("val", "").strip()
-    if val == "开启自动撤回":
-        scene_record.set_auto_withdraw(True)
-    elif val == "关闭自动撤回":
-        scene_record.set_auto_withdraw(False)
-    else:
-        await today_waifu_set_auto_withdraw.finish()
-    await today_waifu_set_auto_withdraw.finish(f"本群设置为{val}")
-
-
-@today_waifu_set_auto_set_other_half.handle()
-async def _(session: Uninfo, val: dict[str, Any] = RegexDict()):
-    scene_record: SceneRecord = SceneManager().get_scene(session.scene)
-    val: str = val.get("val", "").strip()
-    if val == "开启自动设置对方老婆":
-        scene_record.set_auto_set_other_half(True)
-    elif val == "关闭自动设置对方老婆":
-        scene_record.set_auto_set_other_half(False)
-    else:
-        await today_waifu_set_auto_set_other_half.finish()
-    await today_waifu_set_auto_set_other_half.finish(f"本群设置为{val}")
-
-
-@today_waifu_set_limit_times.handle()
-async def _(session: Uninfo, times: dict[str, Any] = RegexDict()):
-    limit_times: str = times.get(
-        "times", str(plugin_config.today_waifu_default_limit_times)
-    ).strip()
-    try:
-        limit_times_num = int(limit_times)
-    except ValueError:
-        await today_waifu_set_limit_times.finish("换老婆次数应为整数")
-    scene_record: SceneRecord = SceneManager().get_scene(session.scene)
-    scene_record.set_limit_times(limit_times_num)
-    await today_waifu_set_limit_times.finish(
-        f"已将本群换老婆次数设置为{limit_times_num}次"
-    )
-
-
-@today_waifu_change.handle()
-async def _(session: Uninfo, interface: QryItrface):
-    scene_record: SceneRecord = SceneManager().get_scene(session.scene)
-    msg: UniMessage = await scene_record.change_waifu(session, interface)
-    receipt = await msg.send(at_sender=True, reply_to=True)
-    if scene_record.auto_withdraw:
-        await receipt.recall(delay=max(1, scene_record.auto_withdraw_delay))
-
-
-@today_waifu.handle()
-async def _(session: Uninfo, interface: QryItrface):
-    scene_record: SceneRecord = SceneManager().get_scene(session.scene)
-    msg: UniMessage = await scene_record.get_waifu(session, interface)
-    receipt = await msg.send(at_sender=True, reply_to=True)
-    if scene_record.auto_withdraw:
-        await receipt.recall(delay=max(1, scene_record.auto_withdraw_delay))
-
-
-@today_waifu_refresh.handle()
-async def _(session: Uninfo, name: dict[str, Any] = RegexDict()):
-    scene_record: SceneRecord = SceneManager().get_scene(session.scene)
-    plugin_name: str = name.get("name", __plugin_name__).strip()
-    scene_record.clear_record()
-    await today_waifu_refresh.finish(f"{plugin_name}已刷新！")
+__all__ = [
+    "commands",
+    "migrations",
+]

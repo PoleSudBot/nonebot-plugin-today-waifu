@@ -3,16 +3,16 @@ from __future__ import annotations
 import random
 from typing import Any
 
-from PIL import Image
 from PIL.Image import Image as PILImage
 
 from ..config import PJSK_ASSET_DIR
 from .common import (
+    OverlaySpec,
     OUTPUT_SIZE,
+    RoundedRectClipSpec,
+    ThemeCardSpec,
     choose_by_weight,
-    clone_overlay_resized,
-    fit_square,
-    paste,
+    render_card_by_spec,
 )
 
 KEY = "pjsk"
@@ -27,8 +27,7 @@ TRAINING_WEIGHTS = (
     ("after_training", 50),
 )
 BASE_CANVAS_SIZE = 156
-AVATAR_XY = (2, 2)
-AVATAR_SIZE = 152
+CARD_SIZE = 156
 ATTR_SIZE = 35
 STAR_SIZE = 24
 STAR_POSITIONS = (
@@ -65,7 +64,7 @@ def build_context(payload: dict[str, Any]) -> dict[str, Any]:
     else:
         star_name = "rare_star_normal.png"
         star_render_count = payload["star_count"]
-    return {
+    context = {
         "output_size": OUTPUT_SIZE,
         "frame_path": PJSK_ASSET_DIR / frame_name,
         "attr_path": PJSK_ASSET_DIR / f"attr_{payload['attribute']}.png",
@@ -73,38 +72,33 @@ def build_context(payload: dict[str, Any]) -> dict[str, Any]:
         "star_count": payload["star_count"],
         "star_render_count": star_render_count,
     }
+    return {**context, "render_spec": build_render_spec(context)}
+
+
+def build_render_spec(theme_data: dict[str, Any]) -> ThemeCardSpec:
+    star_render_count = int(theme_data.get("star_render_count", theme_data["star_count"]))
+    return ThemeCardSpec(
+        base_canvas_size=BASE_CANVAS_SIZE,
+        avatar_box=(0, 0, CARD_SIZE, CARD_SIZE),
+        output_size=int(theme_data.get("output_size", OUTPUT_SIZE)),
+        post_clip=RoundedRectClipSpec(box=(2, 2, 152, 152), radius=8),
+        overlays=(
+            OverlaySpec(
+                path=theme_data["frame_path"],
+                size=(CARD_SIZE, CARD_SIZE),
+            ),
+            OverlaySpec(
+                path=theme_data["attr_path"],
+                size=(ATTR_SIZE, ATTR_SIZE),
+            ),
+            OverlaySpec(
+                path=theme_data["star_path"],
+                positions=STAR_POSITIONS[:star_render_count],
+                size=(STAR_SIZE, STAR_SIZE),
+            ),
+        ),
+    )
 
 
 def render_card(avatar: PILImage, theme_data: dict[str, Any]) -> PILImage:
-    canvas_size = int(theme_data.get("output_size", OUTPUT_SIZE))
-    scale = canvas_size / BASE_CANVAS_SIZE
-    star_render_count = int(theme_data.get("star_render_count", theme_data["star_count"]))
-    base = Image.new("RGBA", (canvas_size, canvas_size))
-
-    avatar_size = round(AVATAR_SIZE * scale)
-    avatar_region = fit_square(avatar, avatar_size)
-    paste(
-        base,
-        avatar_region,
-        (round(AVATAR_XY[0] * scale), round(AVATAR_XY[1] * scale)),
-    )
-
-    frame = clone_overlay_resized(
-        theme_data["frame_path"],
-        (canvas_size, canvas_size),
-    )
-    attr = clone_overlay_resized(
-        theme_data["attr_path"],
-        (round(ATTR_SIZE * scale), round(ATTR_SIZE * scale)),
-    )
-    star = clone_overlay_resized(
-        theme_data["star_path"],
-        (round(STAR_SIZE * scale), round(STAR_SIZE * scale)),
-    )
-
-    paste(base, frame, (0, 0))
-    paste(base, attr, (0, 0))
-    for x, y in STAR_POSITIONS[:star_render_count]:
-        paste(base, star, (round(x * scale), round(y * scale)))
-
-    return base
+    return render_card_by_spec(avatar, build_render_spec(theme_data))

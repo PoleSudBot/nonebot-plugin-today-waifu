@@ -27,9 +27,14 @@ from nonebot_plugin_today_waifu.services.app import (
 )
 from nonebot_plugin_today_waifu.theme_kits import bangdream, pjsk
 from nonebot_plugin_today_waifu.theme_kits.common import (
+    OverlaySpec,
+    RoundedRectClipSpec,
+    ThemeCardSpec,
+    clone_frame_window_mask,
     clone_overlay_longest_edge,
     clone_overlay_resized,
     clone_overlay_width,
+    render_card_by_spec,
 )
 from nonebot_plugin_today_waifu.themes import (
     build_theme_context,
@@ -325,10 +330,19 @@ def test_theme_selection_and_local_assets():
     assert bangdream["border_path"].exists()
     assert bangdream["star_path"].exists()
     assert "assets/bangdream" in str(bangdream["border_path"])
+    assert bangdream["render_spec"].output_size == 1024
+    assert bangdream["render_spec"].clip.kind == "frame_window"
+    assert bangdream["render_spec"].post_clip is None
     assert isinstance(pjsk["frame_path"], Path)
     assert pjsk["frame_path"].exists()
     assert "assets/pjsk" in str(pjsk["frame_path"])
     assert "assets-direct.unipjsk.com" not in str(pjsk["frame_path"])
+    assert pjsk["render_spec"].output_size == 1024
+    assert pjsk["render_spec"].clip is None
+    assert pjsk["render_spec"].post_clip is not None
+    assert pjsk["render_spec"].post_clip.kind == "rounded_rect"
+    assert pjsk["render_spec"].post_clip.box == (2, 2, 152, 152)
+    assert pjsk["render_spec"].post_clip.radius == 8
 
 
 def test_bangdream_card_composition():
@@ -351,7 +365,9 @@ def test_bangdream_card_composition():
         colors = image.getcolors(maxcolors=200000)
         assert colors is not None
         assert len(colors) > 1
-        assert image.getpixel((154, 154)) != (240, 32, 32, 255)
+        for point in ((0, 0), (1023, 0), (0, 1023), (1023, 1023)):
+            assert image.getpixel(point) != (240, 32, 32, 255)
+        assert image.getpixel((512, 512)) == (240, 32, 32, 255)
         assert image.getpixel((884, 140)) != (240, 32, 32, 255)
         assert image.getpixel((112, 930)) != (240, 32, 32, 255)
 
@@ -376,10 +392,13 @@ def test_pjsk_card_composition():
         colors = image.getcolors(maxcolors=200000)
         assert colors is not None
         assert len(colors) > 1
-        assert image.getpixel((0, 0)) != (32, 160, 240, 255)
+        for point in ((10, 10), (1013, 10), (10, 1013), (1013, 1013)):
+            assert image.getpixel(point)[3] == 0
+        assert image.getpixel((512, 512)) == (32, 160, 240, 255)
+        assert image.getpixel((512, 40))[3] >= 180
+        assert image.getpixel((512, 60))[3] >= 180
         assert image.getpixel((120, 120)) != (32, 160, 240, 255)
         assert image.getpixel((111, 900)) != (32, 160, 240, 255)
-        assert image.getpixel((512, 512)) == (32, 160, 240, 255)
 
 
 def test_theme_card_client_reuses_single_instance(monkeypatch):
@@ -536,6 +555,52 @@ def test_scaled_overlay_helpers_return_independent_copies():
     assert width_fixed.width == 32
 
 
+def test_bangdream_frame_window_masks_are_stable():
+    asset_dir = (
+        Path(__file__).resolve().parents[1]
+        / "nonebot_plugin_today_waifu"
+        / "assets"
+        / "bangdream"
+    )
+    expected_pixels = {
+        "card-3.png": 25016,
+        "card-4.png": 25016,
+        "card-5.png": 24970,
+    }
+
+    for name, pixel_count in expected_pixels.items():
+        mask = clone_frame_window_mask(asset_dir / name)
+        assert mask.size == (180, 180)
+        assert mask.getbbox() == (8, 8, 172, 172)
+        assert mask.getpixel((0, 0)) == 0
+        assert mask.getpixel((90, 90)) == 255
+        assert sum(1 for value in mask.getdata() if value) == pixel_count
+
+
+def test_post_clip_applies_after_overlays(tmp_path: Path):
+    overlay_path = tmp_path / "overlay.png"
+    overlay = Image.new("RGBA", (100, 100), (48, 96, 240, 255))
+    overlay.save(overlay_path)
+
+    avatar = Image.new("RGBA", (100, 100), (240, 48, 48, 255))
+    image = render_card_by_spec(
+        avatar,
+        ThemeCardSpec(
+            base_canvas_size=100,
+            avatar_box=(0, 0, 100, 100),
+            output_size=100,
+            overlays=(OverlaySpec(path=overlay_path, size=(100, 100)),),
+            post_clip=RoundedRectClipSpec(box=(10, 10, 80, 80), radius=12),
+        ),
+    )
+
+    assert image.getpixel((50, 50)) == (48, 96, 240, 255)
+    assert image.getpixel((5, 5))[3] == 0
+    assert image.getpixel((95, 5))[3] == 0
+    assert image.getpixel((5, 95))[3] == 0
+    assert image.getpixel((95, 95))[3] == 0
+
+
 def test_bangdream_payload_branches(monkeypatch):
     monkeypatch.setattr(bangdream.random, "choice", lambda seq: seq[0])
 
@@ -590,6 +655,50 @@ def test_pjsk_payload_branches(monkeypatch):
         assert context["star_path"].name == star_name
         assert context["star_count"] == star_count
         assert context["star_render_count"] == star_render_count
+
+
+def test_pjsk_post_clip_rounds_card_corners():
+    avatar_bytes = _make_avatar_bytes((32, 160, 240))
+    theme_data = build_theme_context(
+        "pjsk",
+        {
+            "attribute": "cute",
+            "rarity": "4",
+            "training_state": "after_training",
+            "star_count": 4,
+        },
+    )
+
+    output = compose_theme_card(avatar_bytes, "pjsk", theme_data)
+
+    with Image.open(BytesIO(output)) as image:
+        for point in ((10, 10), (1013, 10), (10, 1013), (1013, 1013)):
+            assert image.getpixel(point)[3] == 0
+        assert image.getpixel((image.width // 2, 40))[3] >= 180
+        assert image.getpixel((image.width // 2, 60))[3] >= 180
+        assert image.getpixel((20, image.height // 2)) == (32, 160, 240, 255)
+
+
+def test_pjsk_birthday_post_clip_preserves_badge_and_attr():
+    avatar_bytes = _make_avatar_bytes((32, 160, 240))
+    theme_data = build_theme_context(
+        "pjsk",
+        {
+            "attribute": "happy",
+            "rarity": "birthday",
+            "training_state": "normal",
+            "star_count": 4,
+        },
+    )
+
+    output = compose_theme_card(avatar_bytes, "pjsk", theme_data)
+
+    with Image.open(BytesIO(output)) as image:
+        for point in ((10, 10), (1013, 10), (10, 1013), (1013, 1013)):
+            assert image.getpixel(point)[3] == 0
+        assert image.getpixel((120, 120)) != (32, 160, 240, 255)
+        assert image.getpixel((145, 900)) != (32, 160, 240, 255)
+        assert image.getpixel((512, 40))[3] >= 180
 
 
 def test_theme_rarity_distribution_regression():

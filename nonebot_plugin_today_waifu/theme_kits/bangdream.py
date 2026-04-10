@@ -7,13 +7,12 @@ from PIL.Image import Image as PILImage
 
 from ..config import BANGDREAM_ASSET_DIR
 from .common import (
+    FrameWindowClipSpec,
+    OverlaySpec,
     OUTPUT_SIZE,
+    ThemeCardSpec,
     choose_by_weight,
-    clone_overlay_longest_edge,
-    clone_overlay_resized,
-    clone_overlay_width,
-    fit_square,
-    paste,
+    render_card_by_spec,
 )
 
 KEY = "bangdream"
@@ -29,6 +28,16 @@ STAR_TYPE_WEIGHTS = (
     ("color", 50),
 )
 BASE_CANVAS_SIZE = 1000
+FULL_CARD_SIZE = 1000
+FRAME_SIZE = 1000
+ATTR_XY = (734, 6)
+ATTR_SIZE = 260
+BAND_XY = (30, 30)
+BAND_LONGEST_EDGE = 240
+STAR_X = 20
+STAR_Y = 820
+STAR_STEP = 120
+STAR_WIDTH = 180
 
 
 def build_payload() -> dict[str, Any]:
@@ -41,41 +50,58 @@ def build_payload() -> dict[str, Any]:
 
 
 def build_context(payload: dict[str, Any]) -> dict[str, Any]:
-    return {
+    border_path = BANGDREAM_ASSET_DIR / f"card-{payload['star_count']}.png"
+    attr_path = BANGDREAM_ASSET_DIR / f"{payload['attribute']}.png"
+    band_path = BANGDREAM_ASSET_DIR / f"{payload['band']}.png"
+    star_path = BANGDREAM_ASSET_DIR / (
+        "color_star.png" if payload["star_type"] == "color" else "normal_star.png"
+    )
+    context = {
         "output_size": OUTPUT_SIZE,
-        "border_path": BANGDREAM_ASSET_DIR / f"card-{payload['star_count']}.png",
-        "attr_path": BANGDREAM_ASSET_DIR / f"{payload['attribute']}.png",
-        "band_path": BANGDREAM_ASSET_DIR / f"{payload['band']}.png",
-        "star_path": BANGDREAM_ASSET_DIR
-        / ("color_star.png" if payload["star_type"] == "color" else "normal_star.png"),
+        "border_path": border_path,
+        "attr_path": attr_path,
+        "band_path": band_path,
+        "star_path": star_path,
         "star_count": payload["star_count"],
     }
+    return {**context, "render_spec": build_render_spec(context)}
+
+
+def build_render_spec(theme_data: dict[str, Any]) -> ThemeCardSpec:
+    positions = tuple(
+        (STAR_X, STAR_Y - index * STAR_STEP)
+        for index in range(int(theme_data["star_count"]))
+    )
+    return ThemeCardSpec(
+        base_canvas_size=BASE_CANVAS_SIZE,
+        avatar_box=(0, 0, FULL_CARD_SIZE, FULL_CARD_SIZE),
+        output_size=int(theme_data.get("output_size", OUTPUT_SIZE)),
+        clip=FrameWindowClipSpec(frame_path=theme_data["border_path"]),
+        overlays=(
+            OverlaySpec(
+                path=theme_data["border_path"],
+                size=(FRAME_SIZE, FRAME_SIZE),
+            ),
+            OverlaySpec(
+                path=theme_data["attr_path"],
+                positions=(ATTR_XY,),
+                size=(ATTR_SIZE, ATTR_SIZE),
+            ),
+            OverlaySpec(
+                path=theme_data["band_path"],
+                positions=(BAND_XY,),
+                resize_mode="longest_edge",
+                longest_edge=BAND_LONGEST_EDGE,
+            ),
+            OverlaySpec(
+                path=theme_data["star_path"],
+                positions=positions,
+                resize_mode="width",
+                width=STAR_WIDTH,
+            ),
+        ),
+    )
 
 
 def render_card(avatar: PILImage, theme_data: dict[str, Any]) -> PILImage:
-    canvas_size = int(theme_data.get("output_size", OUTPUT_SIZE))
-    ratio = canvas_size / BASE_CANVAS_SIZE
-    base = fit_square(avatar, canvas_size)
-
-    border = clone_overlay_resized(
-        theme_data["border_path"],
-        (canvas_size, canvas_size),
-    )
-    attr = clone_overlay_resized(
-        theme_data["attr_path"],
-        (round(260 * ratio), round(260 * ratio)),
-    )
-    band = clone_overlay_longest_edge(theme_data["band_path"], round(240 * ratio))
-    star = clone_overlay_width(theme_data["star_path"], round(180 * ratio))
-
-    paste(base, border, (0, 0))
-    paste(base, attr, (round(734 * ratio), round(6 * ratio)))
-    paste(base, band, (round(30 * ratio), round(30 * ratio)))
-
-    star_x = round(20 * ratio)
-    star_y = round(820 * ratio)
-    star_step = round(120 * ratio)
-    for index in range(theme_data["star_count"]):
-        paste(base, star, (star_x, star_y - index * star_step))
-
-    return base
+    return render_card_by_spec(avatar, build_render_spec(theme_data))

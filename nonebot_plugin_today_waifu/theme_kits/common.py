@@ -12,6 +12,7 @@ from PIL.Image import Image as PILImage
 from PIL.Image import Resampling
 
 OUTPUT_SIZE = 1024
+MASK_SUPERSAMPLE_SCALE = 4
 
 T = TypeVar("T")
 Point: TypeAlias = tuple[int, int]
@@ -218,6 +219,28 @@ def scale_box(box: Rect, ratio: float) -> Rect:
     )
 
 
+def _build_antialiased_rounded_rect_mask(
+    canvas_size: int,
+    box: Rect,
+    radius: int,
+) -> PILImage:
+    scale = MASK_SUPERSAMPLE_SCALE
+    mask = Image.new("L", (canvas_size * scale, canvas_size * scale))
+    draw = ImageDraw.Draw(mask)
+    x, y, width, height = box
+    left = x * scale
+    top = y * scale
+    # Pillow's rectangle bounds are inclusive, so subtract one pixel to preserve width/height.
+    right = left + max(1, width * scale) - 1
+    bottom = top + max(1, height * scale) - 1
+    draw.rounded_rectangle(
+        (left, top, right, bottom),
+        radius=max(0, radius * scale),
+        fill=255,
+    )
+    return mask.resize((canvas_size, canvas_size), Resampling.LANCZOS)
+
+
 def _resolve_overlay(overlay: OverlaySpec, ratio: float) -> PILImage:
     if overlay.resize_mode == "stretch":
         if overlay.size is None:
@@ -239,15 +262,11 @@ def _resolve_overlay(overlay: OverlaySpec, ratio: float) -> PILImage:
 
 def _build_clip_mask(clip: CardClipSpec, canvas_size: int, ratio: float) -> PILImage:
     if clip.kind == "rounded_rect":
-        x, y, width, height = scale_box(clip.box, ratio)
-        mask = Image.new("L", (canvas_size, canvas_size))
-        draw = ImageDraw.Draw(mask)
-        draw.rounded_rectangle(
-            (x, y, x + width, y + height),
-            radius=max(0, round(clip.radius * ratio)),
-            fill=255,
+        return _build_antialiased_rounded_rect_mask(
+            canvas_size,
+            scale_box(clip.box, ratio),
+            max(0, round(clip.radius * ratio)),
         )
-        return mask
     if clip.kind == "frame_window":
         return clone_frame_window_mask(clip.frame_path).resize(
             (canvas_size, canvas_size),

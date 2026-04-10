@@ -81,7 +81,8 @@ def build_render_spec(theme_data: dict[str, Any]) -> ThemeCardSpec:
         base_canvas_size=BASE_CANVAS_SIZE,
         avatar_box=(0, 0, CARD_SIZE, CARD_SIZE),
         output_size=int(theme_data.get("output_size", OUTPUT_SIZE)),
-        post_clip=RoundedRectClipSpec(box=(2, 2, 152, 152), radius=8),
+        # Match bangdream's shallower corner proportion, but keep a smooth geometric curve.
+        post_clip=RoundedRectClipSpec(box=(0, 0, CARD_SIZE, CARD_SIZE), radius=8),
         overlays=(
             OverlaySpec(
                 path=theme_data["frame_path"],

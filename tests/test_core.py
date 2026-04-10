@@ -341,7 +341,7 @@ def test_theme_selection_and_local_assets():
     assert pjsk["render_spec"].clip is None
     assert pjsk["render_spec"].post_clip is not None
     assert pjsk["render_spec"].post_clip.kind == "rounded_rect"
-    assert pjsk["render_spec"].post_clip.box == (2, 2, 152, 152)
+    assert pjsk["render_spec"].post_clip.box == (0, 0, 156, 156)
     assert pjsk["render_spec"].post_clip.radius == 8
 
 
@@ -392,8 +392,10 @@ def test_pjsk_card_composition():
         colors = image.getcolors(maxcolors=200000)
         assert colors is not None
         assert len(colors) > 1
-        for point in ((10, 10), (1013, 10), (10, 1013), (1013, 1013)):
+        for point in ((0, 0), (1023, 0), (0, 1023), (1023, 1023)):
             assert image.getpixel(point)[3] == 0
+        for point in ((16, 16), (1007, 16), (16, 1007), (1007, 1007)):
+            assert image.getpixel(point)[3] > 0
         assert image.getpixel((512, 512)) == (32, 160, 240, 255)
         assert image.getpixel((512, 40))[3] >= 180
         assert image.getpixel((512, 60))[3] >= 180
@@ -601,6 +603,27 @@ def test_post_clip_applies_after_overlays(tmp_path: Path):
     assert image.getpixel((95, 95))[3] == 0
 
 
+def test_post_clip_rounded_rect_mask_is_antialiased():
+    avatar = Image.new("RGBA", (100, 100), (240, 48, 48, 255))
+    image = render_card_by_spec(
+        avatar,
+        ThemeCardSpec(
+            base_canvas_size=100,
+            avatar_box=(0, 0, 100, 100),
+            output_size=100,
+            post_clip=RoundedRectClipSpec(box=(10, 10, 80, 80), radius=12),
+        ),
+    )
+
+    sampled_alphas = {
+        image.getpixel((x, y))[3]
+        for x in range(0, 25)
+        for y in range(0, 25)
+    }
+
+    assert any(0 < alpha < 255 for alpha in sampled_alphas)
+
+
 def test_bangdream_payload_branches(monkeypatch):
     monkeypatch.setattr(bangdream.random, "choice", lambda seq: seq[0])
 
@@ -672,11 +695,20 @@ def test_pjsk_post_clip_rounds_card_corners():
     output = compose_theme_card(avatar_bytes, "pjsk", theme_data)
 
     with Image.open(BytesIO(output)) as image:
-        for point in ((10, 10), (1013, 10), (10, 1013), (1013, 1013)):
+        for point in ((0, 0), (1023, 0), (0, 1023), (1023, 1023)):
             assert image.getpixel(point)[3] == 0
+        for point in ((16, 16), (1007, 16), (16, 1007), (1007, 1007)):
+            assert image.getpixel(point)[3] > 0
         assert image.getpixel((image.width // 2, 40))[3] >= 180
         assert image.getpixel((image.width // 2, 60))[3] >= 180
         assert image.getpixel((20, image.height // 2)) == (32, 160, 240, 255)
+
+        thumbnail = image.resize((156, 156), Image.Resampling.LANCZOS)
+        thumbnail_on_white = Image.new("RGBA", thumbnail.size, (255, 255, 255, 255))
+        thumbnail_on_white.alpha_composite(thumbnail)
+        for point in ((2, 2), (153, 2), (2, 153), (153, 153)):
+            assert thumbnail.getpixel(point)[3] > 0
+            assert thumbnail_on_white.getpixel(point) != (255, 255, 255, 255)
 
 
 def test_pjsk_birthday_post_clip_preserves_badge_and_attr():
@@ -694,8 +726,10 @@ def test_pjsk_birthday_post_clip_preserves_badge_and_attr():
     output = compose_theme_card(avatar_bytes, "pjsk", theme_data)
 
     with Image.open(BytesIO(output)) as image:
-        for point in ((10, 10), (1013, 10), (10, 1013), (1013, 1013)):
+        for point in ((0, 0), (1023, 0), (0, 1023), (1023, 1023)):
             assert image.getpixel(point)[3] == 0
+        for point in ((16, 16), (1007, 16), (16, 1007), (1007, 1007)):
+            assert image.getpixel(point)[3] > 0
         assert image.getpixel((120, 120)) != (32, 160, 240, 255)
         assert image.getpixel((145, 900)) != (32, 160, 240, 255)
         assert image.getpixel((512, 40))[3] >= 180

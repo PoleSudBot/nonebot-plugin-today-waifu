@@ -1,3 +1,4 @@
+{% set columns = columns | default(4) %}
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -67,10 +68,11 @@
     }
     .grid {
       display: grid;
-      grid-template-columns: repeat(4, 1fr);
+      grid-template-columns: repeat({{ columns }}, minmax(0, 1fr));
       gap: 16px;
     }
     .pair {
+      min-width: 0;
       background: rgba(255, 255, 255, 0.85);
       border: 1px solid rgba(255, 255, 255, 0.9);
       border-radius: 20px;
@@ -102,6 +104,7 @@
     }
     .names {
       text-align: center;
+      min-width: 0;
       width: 100%;
       font-size: 15px;
       font-weight: 600;
@@ -110,6 +113,7 @@
     }
     .name-truncate {
       display: block;
+      min-width: 0;
       width: 100%;
       overflow: hidden;
       white-space: nowrap;

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import Counter
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,11 +14,16 @@ from nonebot_plugin_today_waifu.bootstrap import inject_orm_database_url
 import nonebot_plugin_today_waifu.commands as commands_module
 from nonebot_plugin_today_waifu.config import plugin_config
 from nonebot_plugin_today_waifu.constants import PairStatus, SelectMode
-from nonebot_plugin_today_waifu.render import compose_theme_card, render_theme_card
+from nonebot_plugin_today_waifu.render import (
+    compose_theme_card,
+    render_theme_card,
+)
 import nonebot_plugin_today_waifu.render.card_renderer as card_renderer_module
 import nonebot_plugin_today_waifu.render.runtime as runtime_module
+import nonebot_plugin_today_waifu.repositories as repositories_module
 from nonebot_plugin_today_waifu.services import app as app_module
 from nonebot_plugin_today_waifu.services.app import (
+    CP_ROSTER_COLUMNS,
     DisplayUser,
     ThemeRollResult,
     TodayWaifuService,
@@ -132,6 +137,21 @@ class FakeDailyStateRepo:
 
     async def delete(self, day: date, scene_id: str, user_id: str) -> None:
         self.items.pop((day, scene_id, user_id), None)
+
+    async def list_paired_scene(self, day: date, scene_id: str) -> list[SimpleNamespace]:
+        return sorted(
+            [
+                item
+                for item in self.items.values()
+                if item.date == day
+                and item.scene_id == scene_id
+                and item.status == PairStatus.PAIRED.value
+            ],
+            key=lambda item: (
+                getattr(item, "updated_at", datetime.min),
+                getattr(item, "id", 0),
+            ),
+        )
 
     async def list_locked_user_ids(self, day: date, scene_id: str) -> set[str]:
         return {
@@ -947,3 +967,119 @@ def test_set_pure_love_off_clears_pending_or_active(monkeypatch):
     assert active_message == "本群纯爱模式已关闭。"
     assert active_settings.pure_love_enabled is False
     assert active_settings.pure_love_pending_enable_date is None
+
+
+def test_get_cp_roster_renders_single_image_with_stable_order(monkeypatch):
+    from nonebot_plugin_alconna import UniMessage
+
+    service = TodayWaifuService()
+    today = date(2026, 4, 10)
+    repos = _make_fake_repos(FakeGroupSettings())
+    _patch_with_repos(monkeypatch, repos)
+    monkeypatch.setattr(service, "_today", lambda: today)
+
+    for index in reversed(range(10)):
+        user_id = f"{index:04d}"
+        repos.daily_states.items[(today, "1000", user_id)] = SimpleNamespace(
+            date=today,
+            scene_id="1000",
+            user_id=user_id,
+            status=PairStatus.PAIRED.value,
+            target_id=f"9{index:03d}",
+            lock_mirrored=False,
+            updated_at=datetime(2026, 4, 10, 8, 0, index),
+            id=index,
+        )
+
+    repos.daily_states.items[(today, "1000", "skip")] = SimpleNamespace(
+        date=today,
+        scene_id="1000",
+        user_id="skip",
+        status=PairStatus.PAIRED.value,
+        target_id="9999",
+        lock_mirrored=True,
+    )
+
+    async def _fake_ensure_scene(bot, scene_id: str):
+        assert scene_id == "1000"
+        return {}
+
+    async def _fake_resolve_display_user(bot, scene_id: str, user_id: str, members):
+        return DisplayUser(
+            user_id=user_id,
+            name=f"User {user_id}",
+            avatar_url=None,
+            role_tag=None,
+        )
+
+    captured: dict[str, object] = {}
+
+    async def _fake_render_template_image(template_name: str, context: dict, **kwargs) -> bytes:
+        captured["template_name"] = template_name
+        captured["context"] = context
+        captured["kwargs"] = kwargs
+        return b"cp-roster"
+
+    monkeypatch.setattr(app_module.member_cache, "ensure_scene", _fake_ensure_scene)
+    monkeypatch.setattr(service, "_resolve_display_user", _fake_resolve_display_user)
+    monkeypatch.setattr(app_module, "render_template_image", _fake_render_template_image)
+
+    message = asyncio.run(service.get_cp_roster(_make_bot(), "1000"))
+
+    assert isinstance(message, UniMessage)
+    assert len(message) == 1
+    assert list(message)[0].raw == b"cp-roster"
+    assert captured["template_name"] == "cp_roster.html"
+    assert captured["kwargs"] == {
+        "selector": "main",
+        "width": 1000,
+        "height": 740,
+    }
+    assert captured["context"]["columns"] == CP_ROSTER_COLUMNS
+    assert [pair["left_name"] for pair in captured["context"]["pairs"]] == [
+        f"User {index:04d}" for index in range(10)
+    ]
+    assert [pair["right_name"] for pair in captured["context"]["pairs"]] == [
+        f"User 9{index:03d}" for index in range(10)
+    ]
+
+
+def test_cp_roster_template_uses_four_column_safe_layout():
+    template_source = (
+        Path(__file__).resolve().parents[1]
+        / "nonebot_plugin_today_waifu"
+        / "render"
+        / "templates"
+        / "cp_roster.html"
+    ).read_text(encoding="utf-8")
+
+    assert "{% set columns = columns | default(4) %}" in template_source
+    assert "width: 920px;" in template_source
+    assert "grid-template-columns: repeat({{ columns }}, minmax(0, 1fr));" in template_source
+    assert ".pair {\n      min-width: 0;" in template_source
+    assert ".names {\n      text-align: center;\n      min-width: 0;" in template_source
+    assert ".name-truncate {\n      display: block;\n      min-width: 0;" in template_source
+
+
+def test_daily_state_repo_list_paired_scene_orders_by_updated_at_then_id():
+    captured: dict[str, object] = {}
+
+    class _ScalarResult:
+        def all(self):
+            return []
+
+    class _Session:
+        async def scalars(self, statement):
+            captured["statement"] = statement
+            return _ScalarResult()
+
+    repo = repositories_module.DailyStateRepo(_Session())
+
+    rows = asyncio.run(repo.list_paired_scene(date(2026, 4, 10), "1000"))
+
+    assert rows == []
+    statement = captured["statement"]
+    assert tuple(str(clause) for clause in statement._order_by_clauses) == (
+        "nonebot_plugin_today_waifu_daily_state.updated_at ASC",
+        "nonebot_plugin_today_waifu_daily_state.id ASC",
+    )

@@ -215,6 +215,9 @@ class DailyStateRepo:
             DailyWaifuState.date == day,
             DailyWaifuState.scene_id == scene_id,
             DailyWaifuState.status == "paired",
+        ).order_by(
+            DailyWaifuState.updated_at.asc(),
+            DailyWaifuState.id.asc(),
         )
         return list((await self.session.scalars(statement)).all())
 

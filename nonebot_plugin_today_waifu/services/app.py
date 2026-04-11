@@ -54,6 +54,8 @@ from ..themes import (
     parse_theme_selection,
 )
 
+CP_ROSTER_COLUMNS = 4
+
 
 @dataclass(slots=True)
 class DisplayUser:
@@ -560,15 +562,19 @@ class TodayWaifuService:
                     "right_avatar": target.avatar_url,
                 }
             )
+        columns = CP_ROSTER_COLUMNS
+        row_count = (len(pair_context) + columns - 1) // columns
         image = await render_template_image(
             "cp_roster.html",
             {
                 "scene_id": scene_id,
                 "pairs": pair_context,
                 "title": "本群 CP 花名册",
+                "columns": columns,
             },
+            selector="main",
             width=1000,
-            height=max(480, 260 + ((len(pair_context) + 3) // 4) * 160),
+            height=max(480, 260 + row_count * 160),
         )
         return UniMessage.image(raw=image)
 

@@ -44,7 +44,6 @@ from ..texts import (
     no_waifu_text,
     pure_love_block_change_text,
     repeat_pick_text,
-    special_role_text,
 )
 from ..themes import (
     build_theme_context,
@@ -739,9 +738,6 @@ class TodayWaifuService:
                         target.name,
                     )
                 )
-            if role_line := special_role_text(target.role_tag or ""):
-                extras.append(role_line)
-
             return RelationMessage(
                 text=first_pick_text(target.is_bot),
                 target=target,
@@ -851,9 +847,6 @@ class TodayWaifuService:
                 and not target_state.lock_mirrored
             ):
                 extras.append(mutual_love_text())
-            if role_line := special_role_text(target.role_tag or ""):
-                extras.append(role_line)
-
             return RelationMessage(
                 text=change_success_text(target.is_bot, settings.limit_times - new_change_used),
                 target=target,

@@ -244,6 +244,15 @@ class DailyStateRepo:
         )
         return set((await self.session.scalars(statement)).all())
 
+    async def list_divorced_user_ids(self, day: date, scene_id: str) -> set[str]:
+        """Return users who actively ended today's relation in this scene."""
+        statement = select(DailyWaifuState.user_id).where(
+            DailyWaifuState.date == day,
+            DailyWaifuState.scene_id == scene_id,
+            DailyWaifuState.status == "divorced",
+        )
+        return set((await self.session.scalars(statement)).all())
+
 
 class MemberActivityRepo:
     def __init__(self, session: AsyncSession):

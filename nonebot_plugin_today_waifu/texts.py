@@ -8,7 +8,7 @@ HELP_TEXT = """
 💍 基础玩法
 - 今日老婆：抽今天的群友老婆，同一天返回同一位
 - 换老婆：默认模式可用，按本群设置消耗次数
-- 离婚/分手：清空今日关系并耗尽今天次数
+- 离婚/分手：主动解除今日关系，并暂时退出当天待选池
 - 老婆设置：查看本群抽取设置与当前生效主题
 
 🎨 主题设置
@@ -125,6 +125,38 @@ def need_pick_first_text() -> str:
 
 def no_waifu_text() -> str:
     return NO_WAIFU_TEXT
+
+
+def divorce_success_text() -> str:
+    return random.choice([
+        "今日关系已解除。今天你会暂时退出待选池，明天再重新开始吧。",
+        "已经为你结束今天的关系。今天不会再把你放进待选池，明天再重新结缘吧。",
+        "分开也需要好好收尾。今天你会暂时退出待选池，明天再重新开始。",
+    ])
+
+
+def need_divorce_pick_first_text() -> str:
+    return random.choice([
+        "你今天还没有结缘，不能离婚/分手。先去抽一个老婆吧。",
+        "还没有今日关系可以解除哦，先结缘之后才能分开。",
+        "现在没有可离的关系。要先抽到老婆，才谈得上离婚/分手。",
+    ])
+
+
+def already_divorced_text() -> str:
+    return random.choice([
+        "你今天已经解除过关系了，明天再重新开始吧。",
+        "今天的关系已经收尾啦，不用重复离婚/分手。",
+        "今日已退出待选池，等明天再重新结缘吧。",
+    ])
+
+
+def no_divorce_target_text() -> str:
+    return random.choice([
+        "你现在没有可解除的今日关系。",
+        "今天已经没有老婆可以分开了。",
+        "当前没有可离的关系，先等明天重新开始吧。",
+    ])
 
 
 def divorce_text() -> str:

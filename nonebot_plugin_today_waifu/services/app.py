@@ -19,7 +19,6 @@ from ..config import plugin_config
 from ..constants import (
     DEFAULT_GLOBAL_THEMES,
     MODE_DISPLAY_NAMES,
-    NO_WAIFU_TEXT,
     REPORT_EMPTY_TEXT,
     PairStatus,
     PeriodWindow,
@@ -33,14 +32,17 @@ from ..models import DailyWaifuState, GroupSettings, PairCounter
 from ..render import render_template_image, render_theme_card
 from ..repositories import RepoBundle, with_repos
 from ..texts import (
+    already_divorced_text,
     change_disabled_text,
     change_success_text,
-    divorce_text,
+    divorce_success_text,
     first_pick_text,
     milestone_text,
     mirror_first_pick_text,
     mutual_love_text,
+    need_divorce_pick_first_text,
     need_pick_first_text,
+    no_divorce_target_text,
     no_waifu_text,
     pure_love_block_change_text,
     repeat_pick_text,
@@ -630,6 +632,8 @@ class TodayWaifuService:
             if state:
                 if state.status == PairStatus.EXHAUSTED.value:
                     return RelationMessage(text=no_waifu_text(), target=None)
+                if state.status == PairStatus.DIVORCED.value:
+                    return RelationMessage(text=already_divorced_text(), target=None)
                 extras: list[str] = []
                 if state.lock_mirrored and not state.counted and state.target_id:
                     target_user = await self._resolve_display_user(
@@ -768,6 +772,8 @@ class TodayWaifuService:
                 return RelationMessage(text=change_disabled_text(), target=None)
             if not state:
                 return RelationMessage(text=need_pick_first_text(), target=None)
+            if state.status == PairStatus.DIVORCED.value:
+                return RelationMessage(text=already_divorced_text(), target=None)
             if state.status == PairStatus.EXHAUSTED.value:
                 return RelationMessage(text=no_waifu_text(), target=None)
             if not state.target_id:
@@ -871,11 +877,16 @@ class TodayWaifuService:
         async def _run(repos: RepoBundle):
             settings = await self._get_effective_group_settings(repos, scene_id)
             state = await repos.daily_states.get(today, scene_id, user_id)
-            if not state or state.status == PairStatus.EXHAUSTED.value or not state.target_id:
-                return RelationMessage(text=NO_WAIFU_TEXT, target=None)
+            if not state:
+                return RelationMessage(text=need_divorce_pick_first_text(), target=None)
+            if state.status == PairStatus.DIVORCED.value:
+                return RelationMessage(text=already_divorced_text(), target=None)
+            if state.status == PairStatus.EXHAUSTED.value or not state.target_id:
+                return RelationMessage(text=no_divorce_target_text(), target=None)
 
             await self._rollback_counter_for_state(repos, state, moment)
 
+            # 纯爱镜像是系统代写的反向关系，主动分开时必须同时清理，避免对方保留一条失效绑定。
             if settings.pure_love_enabled and state.target_id != bot.self_id:
                 mirrored_state = await repos.daily_states.get(today, scene_id, state.target_id)
                 if mirrored_state and mirrored_state.target_id == user_id:
@@ -886,7 +897,7 @@ class TodayWaifuService:
                 today,
                 scene_id,
                 user_id,
-                status=PairStatus.EXHAUSTED.value,
+                status=PairStatus.DIVORCED.value,
                 target_id=None,
                 change_used=settings.limit_times,
                 lock_source_user_id=None,
@@ -895,7 +906,7 @@ class TodayWaifuService:
                 theme_payload=None,
                 counted=False,
             )
-            return RelationMessage(text=divorce_text(), target=None)
+            return RelationMessage(text=divorce_success_text(), target=None)
 
         return await with_repos(_run)
 
@@ -977,6 +988,9 @@ class TodayWaifuService:
         pure_love: bool = False,
     ) -> str:
         candidates = set(members) - self._ban_ids
+        # 主动离婚只按当天状态退出待选池，日期切换后无需额外恢复逻辑。
+        divorced_ids = await repos.daily_states.list_divorced_user_ids(self._today(), scene_id)
+        candidates -= divorced_ids
         if requester_id:
             candidates.discard(requester_id)
         if pure_love:

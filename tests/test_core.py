@@ -163,6 +163,15 @@ class FakeDailyStateRepo:
             and item.target_id
         }
 
+    async def list_divorced_user_ids(self, day: date, scene_id: str) -> set[str]:
+        return {
+            item.user_id
+            for item in self.items.values()
+            if item.date == day
+            and item.scene_id == scene_id
+            and item.status == PairStatus.DIVORCED.value
+        }
+
 
 class FakePairCounterRepo:
     def __init__(self):
@@ -969,6 +978,203 @@ def test_set_pure_love_off_clears_pending_or_active(monkeypatch):
     assert active_settings.pure_love_pending_enable_date is None
 
 
+def test_divorce_requires_existing_pick(monkeypatch):
+    service = TodayWaifuService()
+    today = date(2026, 4, 10)
+    repos = _make_fake_repos(FakeGroupSettings())
+    _patch_with_repos(monkeypatch, repos)
+    monkeypatch.setattr(service, "_today", lambda: today)
+    monkeypatch.setattr(
+        app_module,
+        "need_divorce_pick_first_text",
+        lambda: "先结缘后才能离婚",
+    )
+
+    payload = asyncio.run(service._divorce(_make_bot(), _make_session(), {}))
+
+    assert payload.text == "先结缘后才能离婚"
+    assert repos.daily_states.items == {}
+
+
+def test_divorce_marks_user_divorced_and_blocks_same_day_pick(monkeypatch):
+    service = TodayWaifuService()
+    today = date(2026, 4, 10)
+    repos = _make_fake_repos(FakeGroupSettings(limit_times=2))
+    repos.daily_states.items[(today, "1000", "1001")] = SimpleNamespace(
+        date=today,
+        scene_id="1000",
+        user_id="1001",
+        status=PairStatus.PAIRED.value,
+        target_id="2002",
+        change_used=0,
+        lock_source_user_id=None,
+        lock_mirrored=False,
+        theme_key="pjsk",
+        theme_payload={"rarity": "4"},
+        counted=True,
+    )
+    _patch_with_repos(monkeypatch, repos)
+    monkeypatch.setattr(service, "_today", lambda: today)
+    monkeypatch.setattr(app_module, "divorce_success_text", lambda: "离婚成功")
+    monkeypatch.setattr(app_module, "already_divorced_text", lambda: "今天已经离过了")
+
+    payload = asyncio.run(service._divorce(_make_bot(), _make_session(), {}))
+    repeated = asyncio.run(service._resolve_today_waifu(_make_bot(), _make_session(), {}))
+
+    state = repos.daily_states.items[(today, "1000", "1001")]
+    assert payload.text == "离婚成功"
+    assert state.status == PairStatus.DIVORCED.value
+    assert state.target_id is None
+    assert state.change_used == 2
+    assert state.counted is False
+    assert repos.pair_counters.adjustments == [("1000", "1001", "2002", -1)]
+    assert repeated.text == "今天已经离过了"
+    assert repeated.target is None
+
+
+def test_divorced_user_is_excluded_from_future_candidates(monkeypatch):
+    service = TodayWaifuService()
+    today = date(2026, 4, 10)
+    repos = _make_fake_repos(FakeGroupSettings(select_mode=SelectMode.ACTIVE.value))
+    repos.daily_states.items[(today, "1000", "1001")] = SimpleNamespace(
+        date=today,
+        scene_id="1000",
+        user_id="1001",
+        status=PairStatus.DIVORCED.value,
+        target_id=None,
+    )
+    _patch_with_repos(monkeypatch, repos)
+    monkeypatch.setattr(service, "_today", lambda: today)
+
+    target_id = asyncio.run(
+        service._select_candidate(
+            repos,
+            SelectMode.ACTIVE.value,
+            3,
+            "1000",
+            {"1001": None, "1002": None},
+            "9999",
+            requester_id="3001",
+        )
+    )
+
+    assert target_id == "1002"
+
+
+def test_normal_divorce_does_not_clear_existing_inbound_pairs(monkeypatch):
+    service = TodayWaifuService()
+    today = date(2026, 4, 10)
+    repos = _make_fake_repos(FakeGroupSettings())
+    repos.daily_states.items[(today, "1000", "1001")] = SimpleNamespace(
+        date=today,
+        scene_id="1000",
+        user_id="1001",
+        status=PairStatus.PAIRED.value,
+        target_id="2002",
+        change_used=0,
+        lock_source_user_id=None,
+        lock_mirrored=False,
+        theme_key=None,
+        theme_payload=None,
+        counted=True,
+    )
+    repos.daily_states.items[(today, "1000", "3001")] = SimpleNamespace(
+        date=today,
+        scene_id="1000",
+        user_id="3001",
+        status=PairStatus.PAIRED.value,
+        target_id="1001",
+        change_used=0,
+        lock_source_user_id=None,
+        lock_mirrored=False,
+        theme_key=None,
+        theme_payload=None,
+        counted=True,
+    )
+    _patch_with_repos(monkeypatch, repos)
+    monkeypatch.setattr(service, "_today", lambda: today)
+
+    asyncio.run(service._divorce(_make_bot(), _make_session(), {}))
+
+    inbound = repos.daily_states.items[(today, "1000", "3001")]
+    assert inbound.status == PairStatus.PAIRED.value
+    assert inbound.target_id == "1001"
+    assert repos.pair_counters.adjustments == [("1000", "1001", "2002", -1)]
+
+
+def test_pure_love_divorce_clears_mirrored_pair(monkeypatch):
+    service = TodayWaifuService()
+    today = date(2026, 4, 10)
+    repos = _make_fake_repos(FakeGroupSettings(pure_love_enabled=True))
+    repos.daily_states.items[(today, "1000", "1001")] = SimpleNamespace(
+        date=today,
+        scene_id="1000",
+        user_id="1001",
+        status=PairStatus.PAIRED.value,
+        target_id="2002",
+        change_used=0,
+        lock_source_user_id=None,
+        lock_mirrored=False,
+        theme_key=None,
+        theme_payload=None,
+        counted=True,
+    )
+    repos.daily_states.items[(today, "1000", "2002")] = SimpleNamespace(
+        date=today,
+        scene_id="1000",
+        user_id="2002",
+        status=PairStatus.PAIRED.value,
+        target_id="1001",
+        change_used=0,
+        lock_source_user_id="1001",
+        lock_mirrored=True,
+        theme_key=None,
+        theme_payload=None,
+        counted=True,
+    )
+    _patch_with_repos(monkeypatch, repos)
+    monkeypatch.setattr(service, "_today", lambda: today)
+
+    asyncio.run(service._divorce(_make_bot(), _make_session(), {}))
+
+    assert (today, "1000", "2002") not in repos.daily_states.items
+    assert repos.daily_states.items[(today, "1000", "1001")].status == PairStatus.DIVORCED.value
+    assert repos.pair_counters.adjustments == [
+        ("1000", "1001", "2002", -1),
+        ("1000", "2002", "1001", -1),
+    ]
+
+
+def test_divorced_state_does_not_affect_next_day_candidates(monkeypatch):
+    service = TodayWaifuService()
+    today = date(2026, 4, 11)
+    yesterday = date(2026, 4, 10)
+    repos = _make_fake_repos(FakeGroupSettings())
+    repos.daily_states.items[(yesterday, "1000", "1001")] = SimpleNamespace(
+        date=yesterday,
+        scene_id="1000",
+        user_id="1001",
+        status=PairStatus.DIVORCED.value,
+        target_id=None,
+    )
+    _patch_with_repos(monkeypatch, repos)
+    monkeypatch.setattr(service, "_today", lambda: today)
+
+    target_id = asyncio.run(
+        service._select_candidate(
+            repos,
+            SelectMode.RANDOM.value,
+            3,
+            "1000",
+            {"1001": None},
+            "9999",
+            requester_id=None,
+        )
+    )
+
+    assert target_id == "1001"
+
+
 def test_get_cp_roster_renders_single_image_with_stable_order(monkeypatch):
     from nonebot_plugin_alconna import UniMessage
 
@@ -1083,3 +1289,27 @@ def test_daily_state_repo_list_paired_scene_orders_by_updated_at_then_id():
         "nonebot_plugin_today_waifu_daily_state.updated_at ASC",
         "nonebot_plugin_today_waifu_daily_state.id ASC",
     )
+
+
+def test_daily_state_repo_lists_divorced_user_ids_by_day_and_scene():
+    captured: dict[str, object] = {}
+
+    class _ScalarResult:
+        def all(self):
+            return ["1001"]
+
+    class _Session:
+        async def scalars(self, statement):
+            captured["statement"] = statement
+            return _ScalarResult()
+
+    repo = repositories_module.DailyStateRepo(_Session())
+
+    rows = asyncio.run(repo.list_divorced_user_ids(date(2026, 4, 10), "1000"))
+
+    assert rows == {"1001"}
+    statement = captured["statement"]
+    params = statement.compile().params
+    assert params["date_1"] == date(2026, 4, 10)
+    assert params["scene_id_1"] == "1000"
+    assert params["status_1"] == PairStatus.DIVORCED.value

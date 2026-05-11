@@ -8,6 +8,7 @@ from enum import Enum
 class PairStatus(str, Enum):
     PAIRED = "paired"
     EXHAUSTED = "exhausted"
+    DIVORCED = "divorced"
 
 
 class ThemeScope(str, Enum):
@@ -39,7 +40,7 @@ THEME_DISPLAY_NAMES = {
 }
 
 DEFAULT_GLOBAL_THEMES = ["bangdream", "pjsk"]
-DIVORCE_EXHAUSTED_TEXT = "你现在没老婆了！渣男"
+DIVORCE_EXHAUSTED_TEXT = "今日关系已解除。今天你会暂时退出待选池，明天再重新开始吧。"
 NO_WAIFU_TEXT = "你今天没老婆了！渣男"
 PURE_LOVE_ONLY_TEXT = "这个功能只有纯爱模式才能看。"
 REPORT_EMPTY_TEXT = "这一期缘分周刊还是空白，大家今天都挺克制。"

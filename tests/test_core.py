@@ -13,7 +13,8 @@ from nonebot_plugin_today_waifu import texts
 from nonebot_plugin_today_waifu.bootstrap import inject_orm_database_url
 import nonebot_plugin_today_waifu.commands as commands_module
 from nonebot_plugin_today_waifu.config import plugin_config
-from nonebot_plugin_today_waifu.constants import PairStatus, SelectMode
+from nonebot_plugin_today_waifu.constants import PairStatus, SelectMode, ThemeScope
+from nonebot_plugin_today_waifu.models import PairCounter, ThemePreference
 from nonebot_plugin_today_waifu.render import (
     compose_theme_card,
     render_theme_card,
@@ -47,6 +48,9 @@ from nonebot_plugin_today_waifu.themes import (
     parse_theme_selection,
 )
 from PIL import Image, ImageChops
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
 
 
 @dataclass(slots=True)
@@ -135,6 +139,19 @@ class FakeDailyStateRepo:
             setattr(item, key_name, value)
         return item
 
+    async def insert(self, day: date, scene_id: str, user_id: str, **fields):
+        key = (day, scene_id, user_id)
+        if key in self.items:
+            raise IntegrityError("duplicate", None, None)
+        item = SimpleNamespace(
+            date=day,
+            scene_id=scene_id,
+            user_id=user_id,
+            **fields,
+        )
+        self.items[key] = item
+        return item
+
     async def delete(self, day: date, scene_id: str, user_id: str) -> None:
         self.items.pop((day, scene_id, user_id), None)
 
@@ -161,6 +178,15 @@ class FakeDailyStateRepo:
             and item.scene_id == scene_id
             and item.status == PairStatus.PAIRED.value
             and item.target_id
+        }
+
+    async def list_paired_user_ids(self, day: date, scene_id: str) -> set[str]:
+        return {
+            item.user_id
+            for item in self.items.values()
+            if item.date == day
+            and item.scene_id == scene_id
+            and item.status == PairStatus.PAIRED.value
         }
 
     async def list_divorced_user_ids(self, day: date, scene_id: str) -> set[str]:
@@ -314,11 +340,21 @@ def test_finish_message_uses_reply_to_for_unimessage(monkeypatch):
 def test_inject_orm_database_url_from_db_url(monkeypatch):
     config = nonebot.get_driver().config
     monkeypatch.setattr(config, "sqlalchemy_database_url", "", raising=False)
-    monkeypatch.setattr(config, "db_url", "postgresql+asyncpg://tester:pass@localhost/db", raising=False)
+    monkeypatch.setattr(config, "db_url", "postgres://tester:pass@localhost/db", raising=False)
 
     inject_orm_database_url()
 
     assert config.sqlalchemy_database_url == "postgresql+asyncpg://tester:pass@localhost/db"
+
+
+def test_inject_orm_database_url_from_legacy_sqlite(monkeypatch):
+    config = nonebot.get_driver().config
+    monkeypatch.setattr(config, "sqlalchemy_database_url", "", raising=False)
+    monkeypatch.setattr(config, "db_url", "sqlite:./data/db/zhenxun.db", raising=False)
+
+    inject_orm_database_url()
+
+    assert config.sqlalchemy_database_url == "sqlite+aiosqlite:///./data/db/zhenxun.db"
 
 
 def test_inject_orm_database_url_prefers_existing(monkeypatch):
@@ -329,6 +365,38 @@ def test_inject_orm_database_url_prefers_existing(monkeypatch):
     inject_orm_database_url()
 
     assert config.sqlalchemy_database_url == "sqlite+aiosqlite://"
+
+
+def test_bot_pick_probability_default_is_three_percent():
+    assert plugin_config.today_waifu_bot_pick_probability == 0.03
+
+
+def test_get_today_waifu_reports_missing_member_query_interface(monkeypatch):
+    service = TodayWaifuService()
+    monkeypatch.setattr(app_module, "get_interface", lambda bot: None)
+    monkeypatch.setattr(app_module.member_cache, "get_members", lambda scene_id: None)
+
+    message = asyncio.run(service.get_today_waifu(_make_bot(), _make_session()))
+
+    assert "无法获取群成员列表" in str(message)
+
+
+def test_relation_message_wraps_target_identity_with_corner_brackets():
+    service = TodayWaifuService()
+    payload = app_module.RelationMessage(
+        text="你今天的老婆是：",
+        target=DisplayUser(
+            user_id="2002",
+            name="Alice",
+            avatar_url=None,
+            role_tag=None,
+        ),
+    )
+
+    message = asyncio.run(service._build_relation_message(payload))
+
+    assert "「Alice(2002)」" in str(message)
+    assert "\nAlice(2002)" not in str(message)
 
 
 def test_theme_selection_and_local_assets():
@@ -1045,6 +1113,7 @@ def test_divorced_user_is_excluded_from_future_candidates(monkeypatch):
     )
     _patch_with_repos(monkeypatch, repos)
     monkeypatch.setattr(service, "_today", lambda: today)
+    monkeypatch.setattr(plugin_config, "today_waifu_bot_pick_probability", 0.0)
 
     target_id = asyncio.run(
         service._select_candidate(
@@ -1093,6 +1162,7 @@ def test_normal_divorce_does_not_clear_existing_inbound_pairs(monkeypatch):
     )
     _patch_with_repos(monkeypatch, repos)
     monkeypatch.setattr(service, "_today", lambda: today)
+    monkeypatch.setattr(plugin_config, "today_waifu_bot_pick_probability", 0.0)
 
     asyncio.run(service._divorce(_make_bot(), _make_session(), {}))
 
@@ -1145,6 +1215,91 @@ def test_pure_love_divorce_clears_mirrored_pair(monkeypatch):
     ]
 
 
+def test_divorce_clears_stale_mirror_after_pure_love_disabled(monkeypatch):
+    service = TodayWaifuService()
+    today = date(2026, 4, 10)
+    repos = _make_fake_repos(FakeGroupSettings(pure_love_enabled=False))
+    repos.daily_states.items[(today, "1000", "1001")] = SimpleNamespace(
+        date=today,
+        scene_id="1000",
+        user_id="1001",
+        status=PairStatus.PAIRED.value,
+        target_id="2002",
+        change_used=0,
+        lock_source_user_id=None,
+        lock_mirrored=False,
+        theme_key=None,
+        theme_payload=None,
+        counted=True,
+    )
+    repos.daily_states.items[(today, "1000", "2002")] = SimpleNamespace(
+        date=today,
+        scene_id="1000",
+        user_id="2002",
+        status=PairStatus.PAIRED.value,
+        target_id="1001",
+        change_used=0,
+        lock_source_user_id="1001",
+        lock_mirrored=True,
+        theme_key=None,
+        theme_payload=None,
+        counted=True,
+    )
+    _patch_with_repos(monkeypatch, repos)
+    monkeypatch.setattr(service, "_today", lambda: today)
+
+    asyncio.run(service._divorce(_make_bot(), _make_session(), {}))
+
+    assert (today, "1000", "2002") not in repos.daily_states.items
+    assert repos.pair_counters.adjustments == [
+        ("1000", "1001", "2002", -1),
+        ("1000", "2002", "1001", -1),
+    ]
+
+
+def test_mirror_side_divorce_clears_source_pair(monkeypatch):
+    service = TodayWaifuService()
+    today = date(2026, 4, 10)
+    repos = _make_fake_repos(FakeGroupSettings(pure_love_enabled=False))
+    repos.daily_states.items[(today, "1000", "1001")] = SimpleNamespace(
+        date=today,
+        scene_id="1000",
+        user_id="1001",
+        status=PairStatus.PAIRED.value,
+        target_id="2002",
+        change_used=0,
+        lock_source_user_id=None,
+        lock_mirrored=False,
+        theme_key=None,
+        theme_payload=None,
+        counted=True,
+    )
+    repos.daily_states.items[(today, "1000", "2002")] = SimpleNamespace(
+        date=today,
+        scene_id="1000",
+        user_id="2002",
+        status=PairStatus.PAIRED.value,
+        target_id="1001",
+        change_used=0,
+        lock_source_user_id="1001",
+        lock_mirrored=True,
+        theme_key=None,
+        theme_payload=None,
+        counted=True,
+    )
+    _patch_with_repos(monkeypatch, repos)
+    monkeypatch.setattr(service, "_today", lambda: today)
+
+    asyncio.run(service._divorce(_make_bot(), _make_session(user_id="2002"), {}))
+
+    assert (today, "1000", "1001") not in repos.daily_states.items
+    assert repos.daily_states.items[(today, "1000", "2002")].status == PairStatus.DIVORCED.value
+    assert repos.pair_counters.adjustments == [
+        ("1000", "2002", "1001", -1),
+        ("1000", "1001", "2002", -1),
+    ]
+
+
 def test_divorced_state_does_not_affect_next_day_candidates(monkeypatch):
     service = TodayWaifuService()
     today = date(2026, 4, 11)
@@ -1173,6 +1328,232 @@ def test_divorced_state_does_not_affect_next_day_candidates(monkeypatch):
     )
 
     assert target_id == "1001"
+
+
+def test_bot_is_special_candidate_not_regular_member(monkeypatch):
+    service = TodayWaifuService()
+    today = date(2026, 4, 11)
+    repos = _make_fake_repos(FakeGroupSettings())
+    monkeypatch.setattr(service, "_today", lambda: today)
+    monkeypatch.setattr(plugin_config, "today_waifu_bot_pick_probability", 0.0)
+
+    target_id = asyncio.run(
+        service._select_candidate(
+            repos,
+            SelectMode.RANDOM.value,
+            3,
+            "1000",
+            {"1002": None, "9999": None},
+            "9999",
+            requester_id="1001",
+        )
+    )
+
+    assert target_id == "1002"
+
+
+def test_bot_can_be_picked_by_configured_probability(monkeypatch):
+    service = TodayWaifuService()
+    today = date(2026, 4, 11)
+    repos = _make_fake_repos(FakeGroupSettings())
+    monkeypatch.setattr(service, "_today", lambda: today)
+    monkeypatch.setattr(plugin_config, "today_waifu_bot_pick_probability", 1.0)
+
+    target_id = asyncio.run(
+        service._select_candidate(
+            repos,
+            SelectMode.RANDOM.value,
+            3,
+            "1000",
+            {"1002": None},
+            "9999",
+            requester_id="1001",
+        )
+    )
+
+    assert target_id == "9999"
+
+
+def test_bot_probability_respects_extra_exclude(monkeypatch):
+    service = TodayWaifuService()
+    today = date(2026, 4, 11)
+    repos = _make_fake_repos(FakeGroupSettings())
+    monkeypatch.setattr(service, "_today", lambda: today)
+    monkeypatch.setattr(plugin_config, "today_waifu_bot_pick_probability", 1.0)
+
+    target_id = asyncio.run(
+        service._select_candidate(
+            repos,
+            SelectMode.RANDOM.value,
+            3,
+            "1000",
+            {"1002": None},
+            "9999",
+            requester_id="1001",
+            extra_exclude={"9999"},
+        )
+    )
+
+    assert target_id == "1002"
+
+
+def test_bot_fallback_remains_when_no_human_candidate(monkeypatch):
+    service = TodayWaifuService()
+    today = date(2026, 4, 11)
+    repos = _make_fake_repos(FakeGroupSettings())
+    monkeypatch.setattr(service, "_today", lambda: today)
+    monkeypatch.setattr(plugin_config, "today_waifu_bot_pick_probability", 0.0)
+
+    target_id = asyncio.run(
+        service._select_candidate(
+            repos,
+            SelectMode.RANDOM.value,
+            3,
+            "1000",
+            {"1001": None, "9999": None},
+            "9999",
+            requester_id="1001",
+        )
+    )
+
+    assert target_id == "9999"
+
+
+def test_pure_love_user_paired_with_bot_is_not_pickable(monkeypatch):
+    service = TodayWaifuService()
+    today = date(2026, 4, 11)
+    repos = _make_fake_repos(FakeGroupSettings(pure_love_enabled=True))
+    repos.daily_states.items[(today, "1000", "1001")] = SimpleNamespace(
+        date=today,
+        scene_id="1000",
+        user_id="1001",
+        status=PairStatus.PAIRED.value,
+        target_id="9999",
+    )
+    monkeypatch.setattr(service, "_today", lambda: today)
+    monkeypatch.setattr(plugin_config, "today_waifu_bot_pick_probability", 0.0)
+
+    target_id = asyncio.run(
+        service._select_candidate(
+            repos,
+            SelectMode.RANDOM.value,
+            3,
+            "1000",
+            {"1001": None, "2002": None},
+            "9999",
+            requester_id="3003",
+            pure_love=True,
+        )
+    )
+
+    assert target_id == "2002"
+
+
+def test_pure_love_bot_remains_public_special_candidate(monkeypatch):
+    service = TodayWaifuService()
+    today = date(2026, 4, 11)
+    repos = _make_fake_repos(FakeGroupSettings(pure_love_enabled=True))
+    repos.daily_states.items[(today, "1000", "1001")] = SimpleNamespace(
+        date=today,
+        scene_id="1000",
+        user_id="1001",
+        status=PairStatus.PAIRED.value,
+        target_id="9999",
+    )
+    monkeypatch.setattr(service, "_today", lambda: today)
+    monkeypatch.setattr(plugin_config, "today_waifu_bot_pick_probability", 1.0)
+
+    target_id = asyncio.run(
+        service._select_candidate(
+            repos,
+            SelectMode.RANDOM.value,
+            3,
+            "1000",
+            {"1001": None, "2002": None},
+            "9999",
+            requester_id="3003",
+            pure_love=True,
+        )
+    )
+
+    assert target_id == "9999"
+
+
+def test_pure_love_source_user_is_not_pickable(monkeypatch):
+    service = TodayWaifuService()
+    today = date(2026, 4, 11)
+    repos = _make_fake_repos(FakeGroupSettings(pure_love_enabled=True))
+    repos.daily_states.items[(today, "1000", "1001")] = SimpleNamespace(
+        date=today,
+        scene_id="1000",
+        user_id="1001",
+        status=PairStatus.PAIRED.value,
+        target_id="2002",
+    )
+    repos.daily_states.items[(today, "1000", "2002")] = SimpleNamespace(
+        date=today,
+        scene_id="1000",
+        user_id="2002",
+        status=PairStatus.PAIRED.value,
+        target_id="1001",
+        lock_mirrored=True,
+    )
+    monkeypatch.setattr(service, "_today", lambda: today)
+    monkeypatch.setattr(plugin_config, "today_waifu_bot_pick_probability", 0.0)
+
+    target_id = asyncio.run(
+        service._select_candidate(
+            repos,
+            SelectMode.RANDOM.value,
+            3,
+            "1000",
+            {"1001": None, "2002": None, "3003": None},
+            "9999",
+            requester_id="4004",
+            pure_love=True,
+        )
+    )
+
+    assert target_id == "3003"
+
+
+def test_pure_love_binding_retries_on_concurrent_conflict(monkeypatch):
+    service = TodayWaifuService()
+    today = date(2026, 4, 11)
+    repos = _make_fake_repos(FakeGroupSettings(pure_love_enabled=True))
+    repos.daily_states.items[(today, "1000", "2002")] = SimpleNamespace(
+        date=today,
+        scene_id="1000",
+        user_id="2002",
+        status=PairStatus.PAIRED.value,
+        target_id="9999",
+        counted=True,
+    )
+    monkeypatch.setattr(service, "_today", lambda: today)
+    _patch_user_resolution(monkeypatch, service)
+
+    picks = iter(["2002", "2003"])
+
+    async def _fake_select_candidate(*args, **kwargs):
+        return next(picks)
+
+    async def _fake_with_repos(callback):
+        snapshot = dict(repos.daily_states.items)
+        try:
+            return await callback(repos)
+        except IntegrityError:
+            repos.daily_states.items = snapshot
+            raise
+
+    monkeypatch.setattr(service, "_select_candidate", _fake_select_candidate)
+    monkeypatch.setattr(app_module, "with_repos", _fake_with_repos)
+
+    payload = asyncio.run(service._resolve_today_waifu(_make_bot(), _make_session(), {}))
+
+    assert payload.target is not None
+    assert payload.target.user_id == "2003"
+    assert repos.daily_states.items[(today, "1000", "1001")].target_id == "2003"
+    assert repos.daily_states.items[(today, "1000", "2003")].target_id == "1001"
 
 
 def test_get_cp_roster_renders_single_image_with_stable_order(monkeypatch):
@@ -1250,6 +1631,60 @@ def test_get_cp_roster_renders_single_image_with_stable_order(monkeypatch):
     ]
 
 
+def test_get_cp_roster_embeds_avatar_data_uri(monkeypatch):
+    from nonebot_plugin_alconna import UniMessage
+
+    service = TodayWaifuService()
+    today = date(2026, 4, 10)
+    repos = _make_fake_repos(FakeGroupSettings())
+    _patch_with_repos(monkeypatch, repos)
+    monkeypatch.setattr(service, "_today", lambda: today)
+    repos.daily_states.items[(today, "1000", "1001")] = SimpleNamespace(
+        date=today,
+        scene_id="1000",
+        user_id="1001",
+        status=PairStatus.PAIRED.value,
+        target_id="2002",
+        lock_mirrored=False,
+        updated_at=datetime(2026, 4, 10, 8, 0, 0),
+        id=1,
+    )
+
+    async def _fake_ensure_scene(bot, scene_id: str):
+        return {}
+
+    async def _fake_resolve_display_user(bot, scene_id: str, user_id: str, members):
+        return DisplayUser(
+            user_id=user_id,
+            name=f"User {user_id}",
+            avatar_url=f"https://example.com/{user_id}.png",
+            role_tag=None,
+        )
+
+    async def _fake_get_avatar_bytes(url: str) -> bytes:
+        assert url.startswith("https://example.com/")
+        return b"\x89PNG\r\n\x1a\navatar"
+
+    captured: dict[str, object] = {}
+
+    async def _fake_render_template_image(template_name: str, context: dict, **kwargs) -> bytes:
+        captured["context"] = context
+        return b"cp-roster"
+
+    monkeypatch.setattr(app_module.member_cache, "ensure_scene", _fake_ensure_scene)
+    monkeypatch.setattr(service, "_resolve_display_user", _fake_resolve_display_user)
+    monkeypatch.setattr(app_module, "get_avatar_bytes", _fake_get_avatar_bytes)
+    monkeypatch.setattr(app_module, "render_template_image", _fake_render_template_image)
+
+    message = asyncio.run(service.get_cp_roster(_make_bot(), "1000"))
+
+    assert isinstance(message, UniMessage)
+    pair = captured["context"]["pairs"][0]
+    assert pair["left_avatar"].startswith("data:image/png;base64,")
+    assert pair["right_avatar"].startswith("data:image/png;base64,")
+    assert "https://example.com" not in pair["left_avatar"]
+
+
 def test_cp_roster_template_uses_four_column_safe_layout():
     template_source = (
         Path(__file__).resolve().parents[1]
@@ -1313,3 +1748,75 @@ def test_daily_state_repo_lists_divorced_user_ids_by_day_and_scene():
     assert params["date_1"] == date(2026, 4, 10)
     assert params["scene_id_1"] == "1000"
     assert params["status_1"] == PairStatus.DIVORCED.value
+
+
+def test_theme_preference_repo_normalizes_scope_keys():
+    async def _run():
+        engine = create_async_engine(
+            "sqlite+aiosqlite://",
+            poolclass=StaticPool,
+        )
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(ThemePreference.__table__.create)
+            session_maker = async_sessionmaker(engine, expire_on_commit=False)
+            async with session_maker.begin() as session:
+                repo = repositories_module.ThemePreferenceRepo(session)
+                global_item = await repo.upsert(
+                    ThemeScope.GLOBAL.value,
+                    ["bangdream"],
+                )
+                group_item = await repo.upsert(
+                    ThemeScope.GROUP.value,
+                    ["pjsk"],
+                    scene_id="1000",
+                )
+                same_group = await repo.get(ThemeScope.GROUP.value, scene_id="1000")
+
+                assert global_item.scene_id == ""
+                assert global_item.user_id == ""
+                assert group_item.scene_id == "1000"
+                assert group_item.user_id == ""
+                assert same_group is group_item
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_run())
+
+
+def test_pair_counter_repo_adjusts_count_with_upsert():
+    async def _run():
+        engine = create_async_engine(
+            "sqlite+aiosqlite://",
+            poolclass=StaticPool,
+        )
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(PairCounter.__table__.create)
+            session_maker = async_sessionmaker(engine, expire_on_commit=False)
+            moment = datetime(2026, 4, 10, 8, 0, 0)
+            async with session_maker.begin() as session:
+                repo = repositories_module.PairCounterRepo(session)
+
+                assert await repo.adjust("1000", "1001", "2002", 1, moment) == 1
+                assert await repo.adjust("1000", "1001", "2002", 1, moment) == 2
+                assert await repo.adjust("1000", "1001", "2002", -1, moment) == 1
+                assert await repo.adjust("1000", "1001", "2002", -1, moment) == 0
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_run())
+
+
+def test_render_user_card_falls_back_on_invalid_theme_payload():
+    service = TodayWaifuService()
+    target = DisplayUser(
+        user_id="1001",
+        name="Alice",
+        avatar_url="https://example.com/avatar.png",
+        role_tag=None,
+    )
+
+    image = asyncio.run(service._render_user_card(target, "pjsk", {"rarity": "4"}))
+
+    assert image is None

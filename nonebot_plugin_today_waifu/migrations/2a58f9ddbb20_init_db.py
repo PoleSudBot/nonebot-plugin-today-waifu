@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import sqlalchemy as sa
 from alembic import op
+import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 if TYPE_CHECKING:
@@ -57,8 +57,8 @@ def upgrade(name: str = "") -> None:
         "nonebot_plugin_today_waifu_theme_preference",
         sa.Column("id", sa.Integer(), nullable=False),
         sa.Column("scope", sa.String(length=16), nullable=False),
-        sa.Column("scene_id", sa.String(length=64), nullable=True),
-        sa.Column("user_id", sa.String(length=64), nullable=True),
+        sa.Column("scene_id", sa.String(length=64), nullable=False, server_default=""),
+        sa.Column("user_id", sa.String(length=64), nullable=False, server_default=""),
         sa.Column("enabled_theme_keys", _json_type(), nullable=False),
         sa.PrimaryKeyConstraint(
             "id", name=op.f("pk_nonebot_plugin_today_waifu_theme_preference")

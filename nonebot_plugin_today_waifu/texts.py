@@ -127,6 +127,26 @@ def no_waifu_text() -> str:
     return NO_WAIFU_TEXT
 
 
+def no_available_waifu_text() -> str:
+    return random.choice([
+        "今天暂时没有可结缘对象，晚点再试试吧。",
+        "现在候选池空空的，今天先休息一下也不错。",
+        "暂时找不到可以结缘的人选，等群里热闹一点再来吧。",
+    ])
+
+
+def pure_love_pick_busy_text() -> str:
+    return random.choice([
+        "现在结缘请求有点密集，请稍后再试一次。",
+        "红线刚刚打了个结，等一下再抽会更稳。",
+        "当前纯爱配对正在更新中，请稍后再试。",
+    ])
+
+
+def member_query_unavailable_text() -> str:
+    return "当前无法获取群成员列表，暂时不能抽取今日老婆。"
+
+
 def divorce_success_text() -> str:
     return random.choice([
         "今日关系已解除。今天你会暂时退出待选池，明天再重新开始吧。",

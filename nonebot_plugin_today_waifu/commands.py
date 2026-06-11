@@ -9,7 +9,7 @@ from nonebot.internal.rule import Rule
 from nonebot.params import RegexDict
 from nonebot.permission import SUPERUSER
 from nonebot_plugin_alconna import UniMessage
-from nonebot_plugin_uninfo import GROUP, QryItrface, Uninfo
+from nonebot_plugin_uninfo import GROUP, Uninfo
 
 from .config import plugin_config
 from .constants import ReportBucket, ThemeScope
@@ -152,7 +152,7 @@ limit_times_set = on_regex(
     block=True,
 )
 select_mode_set = on_regex(
-    r"^\s*设置抽取模式\s*(?P<mode>随机模式|活跃模式|random|active)\s*$",
+    r"^\s*设置抽取模式\s*(?P<mode>随机|活跃|随机模式|活跃模式|random|active)\s*$",
     permission=GROUP | SUPERUSER,
     rule=NOT_PRIVATE,
     priority=7,
@@ -203,26 +203,26 @@ async def _finish_message(matcher, message: str | UniMessage) -> None:
 
 
 @today_waifu.handle()
-async def _(bot: Bot, session: Uninfo, interface: QryItrface):
+async def _(bot: Bot, session: Uninfo):
     await _finish_message(
         today_waifu,
-        await waifu_service.get_today_waifu(bot, session, interface),
+        await waifu_service.get_today_waifu(bot, session),
     )
 
 
 @today_waifu_change.handle()
-async def _(bot: Bot, session: Uninfo, interface: QryItrface):
+async def _(bot: Bot, session: Uninfo):
     await _finish_message(
         today_waifu_change,
-        await waifu_service.change_waifu(bot, session, interface),
+        await waifu_service.change_waifu(bot, session),
     )
 
 
 @today_waifu_divorce.handle()
-async def _(bot: Bot, session: Uninfo, interface: QryItrface):
+async def _(bot: Bot, session: Uninfo):
     await _finish_message(
         today_waifu_divorce,
-        await waifu_service.divorce(bot, session, interface),
+        await waifu_service.divorce(bot, session),
     )
 
 

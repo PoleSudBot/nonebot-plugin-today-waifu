@@ -52,8 +52,8 @@ class ThemePreference(Model):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     scope: Mapped[str] = mapped_column(String(16))
-    scene_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    scene_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     enabled_theme_keys: Mapped[list[str]] = mapped_column(json_type)
 
 

@@ -87,6 +87,10 @@ class GroupMemberCache:
     def get_member_ids(self, scene_id: str) -> set[str]:
         return set(self._groups.get(scene_id, CachedGroup({}, datetime.min)).members.keys())
 
+    def get_members(self, scene_id: str) -> dict[str, CachedMember] | None:
+        group = self._groups.get(scene_id)
+        return group.members if group else None
+
     def needs_refresh(self, scene_id: str) -> bool:
         group = self._groups.get(scene_id)
         if not group:

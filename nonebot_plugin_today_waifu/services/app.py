@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from nonebot.adapters import Bot
 from nonebot_plugin_alconna import UniMessage
 from nonebot_plugin_alconna.uniseg import Target
 from nonebot_plugin_uninfo import Interface, SceneType, Uninfo, get_interface
+from sqlalchemy.exc import IntegrityError
 
 from ..config import plugin_config
 from ..constants import (
@@ -30,6 +32,7 @@ from ..constants import (
 from ..member_cache import CachedMember, member_cache
 from ..models import DailyWaifuState, GroupSettings, PairCounter
 from ..render import render_template_image, render_theme_card
+from ..render.runtime import get_avatar_bytes
 from ..repositories import RepoBundle, with_repos
 from ..texts import (
     already_divorced_text,
@@ -37,14 +40,17 @@ from ..texts import (
     change_success_text,
     divorce_success_text,
     first_pick_text,
+    member_query_unavailable_text,
     milestone_text,
     mirror_first_pick_text,
     mutual_love_text,
     need_divorce_pick_first_text,
     need_pick_first_text,
+    no_available_waifu_text,
     no_divorce_target_text,
     no_waifu_text,
     pure_love_block_change_text,
+    pure_love_pick_busy_text,
     repeat_pick_text,
 )
 from ..themes import (
@@ -56,6 +62,7 @@ from ..themes import (
 )
 
 CP_ROSTER_COLUMNS = 4
+PURE_LOVE_PICK_RETRY_LIMIT = 3
 
 
 @dataclass(slots=True)
@@ -438,8 +445,10 @@ class TodayWaifuService:
     async def set_select_mode(self, scene_id: str, raw_value: str) -> str:
         normalized = raw_value.strip()
         mapping = {
+            "随机": SelectMode.RANDOM.value,
             "随机模式": SelectMode.RANDOM.value,
             "random": SelectMode.RANDOM.value,
+            "活跃": SelectMode.ACTIVE.value,
             "活跃模式": SelectMode.ACTIVE.value,
             "active": SelectMode.ACTIVE.value,
         }
@@ -496,15 +505,29 @@ class TodayWaifuService:
         count = await with_repos(_run)
         return f"已重置本群今天的老婆记录，共清理 {count} 条状态。"
 
+    async def _ensure_members(
+        self,
+        bot: Bot,
+        session: Uninfo,
+        interface: Interface | None,
+    ) -> dict[str, CachedMember] | None:
+        query_interface = interface or get_interface(bot)
+        if query_interface:
+            return await member_cache.ensure(session, query_interface)
+        # 没有查询接口时只能使用已有缓存；否则继续抽取会把候选池误判为空。
+        return member_cache.get_members(session.scene.id)
+
     async def get_today_waifu(
         self,
         bot: Bot,
         session: Uninfo,
-        interface: Interface,
+        interface: Interface | None = None,
     ) -> UniMessage:
         if not session.scene or not session.user:
             return UniMessage.text("当前会话没有群上下文。")
-        members = await member_cache.ensure(session, interface)
+        members = await self._ensure_members(bot, session, interface)
+        if members is None:
+            return UniMessage.text(member_query_unavailable_text())
         payload = await self._resolve_today_waifu(bot, session, members)
         return await self._build_relation_message(payload)
 
@@ -512,11 +535,13 @@ class TodayWaifuService:
         self,
         bot: Bot,
         session: Uninfo,
-        interface: Interface,
+        interface: Interface | None = None,
     ) -> UniMessage:
         if not session.scene or not session.user:
             return UniMessage.text("当前会话没有群上下文。")
-        members = await member_cache.ensure(session, interface)
+        members = await self._ensure_members(bot, session, interface)
+        if members is None:
+            return UniMessage.text(member_query_unavailable_text())
         payload = await self._change_waifu(bot, session, members)
         return await self._build_relation_message(payload)
 
@@ -524,13 +549,36 @@ class TodayWaifuService:
         self,
         bot: Bot,
         session: Uninfo,
-        interface: Interface,
+        interface: Interface | None = None,
     ) -> UniMessage:
         if not session.scene or not session.user:
             return UniMessage.text("当前会话没有群上下文。")
-        members = await member_cache.ensure(session, interface)
+        members = await self._ensure_members(bot, session, interface)
+        if members is None:
+            return UniMessage.text(member_query_unavailable_text())
         payload = await self._divorce(bot, session, members)
         return await self._build_relation_message(payload)
+
+    def _detect_image_mime(self, data: bytes) -> str:
+        if data.startswith(b"\xff\xd8"):
+            return "image/jpeg"
+        if data.startswith(b"GIF"):
+            return "image/gif"
+        if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+            return "image/webp"
+        return "image/png"
+
+    async def _avatar_data_uri(self, avatar_url: str | None) -> str | None:
+        if not avatar_url:
+            return None
+        try:
+            avatar_bytes = await get_avatar_bytes(avatar_url)
+        except (httpx.HTTPError, OSError, ValueError) as exc:
+            logger.warning(f"花名册头像加载失败，使用空头像: {exc}")
+            return None
+        mime = self._detect_image_mime(avatar_bytes)
+        encoded = base64.b64encode(avatar_bytes).decode("ascii")
+        return f"data:{mime};base64,{encoded}"
 
     async def get_cp_roster(self, bot: Bot, scene_id: str) -> UniMessage:
         members = await member_cache.ensure_scene(bot, scene_id)
@@ -558,9 +606,9 @@ class TodayWaifuService:
             pair_context.append(
                 {
                     "left_name": user.name,
-                    "left_avatar": user.avatar_url,
+                    "left_avatar": await self._avatar_data_uri(user.avatar_url),
                     "right_name": target.name,
-                    "right_avatar": target.avatar_url,
+                    "right_avatar": await self._avatar_data_uri(target.avatar_url),
                 }
             )
         columns = CP_ROSTER_COLUMNS
@@ -619,8 +667,10 @@ class TodayWaifuService:
         moment = self._now()
         scene_id = session.scene.id
         user_id = session.user.id
+        pure_love_attempt = False
 
         async def _run(repos: RepoBundle):
+            nonlocal pure_love_attempt
             settings = await self._get_effective_group_settings(repos, scene_id)
             state = await repos.daily_states.get(today, scene_id, user_id)
             global_settings = await repos.global_settings.get()
@@ -635,7 +685,7 @@ class TodayWaifuService:
                 if state.status == PairStatus.DIVORCED.value:
                     return RelationMessage(text=already_divorced_text(), target=None)
                 extras: list[str] = []
-                if state.lock_mirrored and not state.counted and state.target_id:
+                if state.lock_mirrored and not getattr(state, "counted", False) and state.target_id:
                     target_user = await self._resolve_display_user(
                         bot, scene_id, state.target_id, members
                     )
@@ -682,11 +732,20 @@ class TodayWaifuService:
                 requester_id=user_id,
                 pure_love=pure_love_enabled,
             )
+            if target_id is None:
+                return RelationMessage(text=no_available_waifu_text(), target=None)
             theme_roll = await self._roll_theme_for_scope(repos, scene_id, user_id)
             target = await self._resolve_display_user(bot, scene_id, target_id, members)
             extras: list[str] = []
 
-            await repos.daily_states.upsert(
+            state_writer = (
+                repos.daily_states.insert
+                if pure_love_enabled
+                else repos.daily_states.upsert
+            )
+            pure_love_attempt = pure_love_enabled
+            # 纯爱首抽不能覆盖并发镜像行，否则会把已经锁住的人重新改成自己的关系。
+            await state_writer(
                 today,
                 scene_id,
                 user_id,
@@ -712,7 +771,7 @@ class TodayWaifuService:
 
             if pure_love_enabled and target_id != bot.self_id:
                 mirrored_theme = await self._roll_theme_for_scope(repos, scene_id, target_id)
-                await repos.daily_states.upsert(
+                await repos.daily_states.insert(
                     today,
                     scene_id,
                     target_id,
@@ -750,7 +809,17 @@ class TodayWaifuService:
                 extra_lines=extras,
             )
 
-        return await with_repos(_run)
+        for attempt in range(PURE_LOVE_PICK_RETRY_LIMIT):
+            pure_love_attempt = False
+            try:
+                return await with_repos(_run)
+            except IntegrityError:
+                if not pure_love_attempt or attempt + 1 >= PURE_LOVE_PICK_RETRY_LIMIT:
+                    if pure_love_attempt:
+                        logger.warning("纯爱模式并发绑定冲突，重试后仍未成功")
+                        return RelationMessage(text=pure_love_pick_busy_text(), target=None)
+                    raise
+        return RelationMessage(text=pure_love_pick_busy_text(), target=None)
 
     async def _change_waifu(
         self,
@@ -796,8 +865,6 @@ class TodayWaifuService:
                 return RelationMessage(text=no_waifu_text(), target=None)
 
             old_target_id = state.target_id
-            await self._rollback_counter_for_state(repos, state, moment)
-
             target_id = await self._select_candidate(
                 repos,
                 settings.select_mode,
@@ -808,6 +875,9 @@ class TodayWaifuService:
                 requester_id=user_id,
                 extra_exclude={old_target_id},
             )
+            if target_id is None:
+                return RelationMessage(text=no_available_waifu_text(), target=None)
+            await self._rollback_counter_for_state(repos, state, moment)
             theme_roll = await self._roll_theme_for_scope(repos, scene_id, user_id)
             target = await self._resolve_display_user(bot, scene_id, target_id, members)
 
@@ -886,10 +956,22 @@ class TodayWaifuService:
 
             await self._rollback_counter_for_state(repos, state, moment)
 
-            # 纯爱镜像是系统代写的反向关系，主动分开时必须同时清理，避免对方保留一条失效绑定。
-            if settings.pure_love_enabled and state.target_id != bot.self_id:
+            # 纯爱关系是否需要清理应看落库镜像标记，而不是当前开关状态，避免关闭纯爱后留下旧绑定。
+            if state.lock_mirrored:
+                source_user_id = state.lock_source_user_id or state.target_id
+                if source_user_id:
+                    source_state = await repos.daily_states.get(today, scene_id, source_user_id)
+                    if source_state and source_state.target_id == user_id:
+                        await self._rollback_counter_for_state(repos, source_state, moment)
+                        await repos.daily_states.delete(today, scene_id, source_user_id)
+            elif state.target_id != bot.self_id:
                 mirrored_state = await repos.daily_states.get(today, scene_id, state.target_id)
-                if mirrored_state and mirrored_state.target_id == user_id:
+                if (
+                    mirrored_state
+                    and mirrored_state.lock_mirrored
+                    and mirrored_state.target_id == user_id
+                    and mirrored_state.lock_source_user_id in {None, user_id}
+                ):
                     await self._rollback_counter_for_state(repos, mirrored_state, moment)
                     await repos.daily_states.delete(today, scene_id, state.target_id)
 
@@ -986,8 +1068,10 @@ class TodayWaifuService:
         requester_id: str | None,
         extra_exclude: set[str] | None = None,
         pure_love: bool = False,
-    ) -> str:
+    ) -> str | None:
+        bot_available = bot_self_id not in self._ban_ids
         candidates = set(members) - self._ban_ids
+        candidates.discard(bot_self_id)
         # 主动离婚只按当天状态退出待选池，日期切换后无需额外恢复逻辑。
         divorced_ids = await repos.daily_states.list_divorced_user_ids(self._today(), scene_id)
         candidates -= divorced_ids
@@ -995,8 +1079,12 @@ class TodayWaifuService:
             candidates.discard(requester_id)
         if pure_love:
             locked_ids = await repos.daily_states.list_locked_user_ids(self._today(), scene_id)
+            paired_user_ids = await repos.daily_states.list_paired_user_ids(self._today(), scene_id)
             candidates -= locked_ids
+            candidates -= paired_user_ids
         if extra_exclude:
+            if bot_self_id in extra_exclude:
+                bot_available = False
             candidates -= extra_exclude
 
         final_candidates = candidates
@@ -1007,8 +1095,14 @@ class TodayWaifuService:
                 final_candidates = active_candidates
 
         if final_candidates:
+            if (
+                bot_available
+                and plugin_config.today_waifu_bot_pick_probability > 0
+                and random.random() < plugin_config.today_waifu_bot_pick_probability
+            ):
+                return bot_self_id
             return random.choice(sorted(final_candidates))
-        return bot_self_id
+        return bot_self_id if bot_available else None
 
     async def _roll_theme_for_scope(
         self,
@@ -1103,7 +1197,9 @@ class TodayWaifuService:
     async def _build_relation_message(self, payload: RelationMessage) -> UniMessage:
         message = UniMessage.text(payload.text)
         if payload.target:
-            message += UniMessage.text(f"\n{payload.target.name}({payload.target.user_id})")
+            message += UniMessage.text(
+                f"\n「{payload.target.name}({payload.target.user_id})」"
+            )
             themed = await self._render_user_card(
                 payload.target,
                 payload.theme_key,
@@ -1134,7 +1230,7 @@ class TodayWaifuService:
                 theme_key,
                 theme_data,
             )
-        except (httpx.HTTPError, OSError, ValueError) as exc:
+        except (httpx.HTTPError, OSError, ValueError, KeyError, TypeError) as exc:
             logger.warning(f"渲染主题卡片失败，回退头像模式: {exc}")
             return None
 
@@ -1144,7 +1240,7 @@ class TodayWaifuService:
         state: DailyWaifuState,
         moment: datetime,
     ) -> None:
-        if not state.counted or not state.target_id:
+        if not getattr(state, "counted", False) or not state.target_id:
             return
         if state.target_id == "":
             return

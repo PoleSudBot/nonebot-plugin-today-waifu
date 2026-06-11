@@ -30,6 +30,7 @@ class Config(BaseModel):
     today_waifu_report_hour: int = 23
     today_waifu_report_minute: int = 59
     today_waifu_global_milestone_notify: bool = False
+    today_waifu_bot_pick_probability: float = 0.03
 
     @field_validator(
         "today_waifu_default_limit_times",
@@ -45,6 +46,11 @@ class Config(BaseModel):
     @classmethod
     def _ensure_positive_timeout(cls, value: int) -> int:
         return max(1, value)
+
+    @field_validator("today_waifu_bot_pick_probability")
+    @classmethod
+    def _probability_range(cls, value: float) -> float:
+        return max(0.0, min(1.0, value))
 
     @field_validator(
         "today_waifu_member_refresh_hour",

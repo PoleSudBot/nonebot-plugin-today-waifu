@@ -159,7 +159,7 @@ _✨ 随机抽取群友作为老婆吧！ ✨_
 | `TODAY_WAIFU_AUTO_SET_OTHER_HALF`  | 否  | bool | false  | 如果抽到老婆，是否自动给对方设置<br/>（前提是对方当前没有老婆，并且即使给对方设置，对方也可也继续换老婆）<br/>默认关闭 |
 |     `TODAY_WAIFU_SELECT_MODE`      | 否  | str  | random |       抽取模式，random为随机模式，随机抽取<br/>active为活跃模式，优先选择最近x天发言过的用户       |
 |     `TODAY_WAIFU_ACTIVE_DAYS`      | 否  | int  |   3    |                     活跃天数，默认3天，当选择active模式时生效                     |
-| `TODAY_WAIFU_BOT_PICK_PROBABILITY` | 否  | float |  0.03  |           有真人候选时抽到 bot 的独立彩蛋概率，范围0到1，设为0可关闭           |
+| `TODAY_WAIFU_BOT_PICK_PROBABILITY` | 否  | float | 0.015 |           有真人候选时抽到 bot 的独立彩蛋概率，范围0到1，设为0可关闭           |
 
     # today-waifu 配置样例
 
@@ -176,7 +176,7 @@ _✨ 随机抽取群友作为老婆吧！ ✨_
     TODAY_WAIFU_AUTO_SET_OTHER_HALF = false
     TODAY_WAIFU_SELECT_MODE = "active"
     TODAY_WAIFU_ACTIVE_DAYS = 3
-    TODAY_WAIFU_BOT_PICK_PROBABILITY = 0.03
+    TODAY_WAIFU_BOT_PICK_PROBABILITY = 0.015
 
 ## 🎉 使用
 

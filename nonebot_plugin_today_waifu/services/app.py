@@ -1198,7 +1198,7 @@ class TodayWaifuService:
         message = UniMessage.text(payload.text)
         if payload.target:
             message += UniMessage.text(
-                f"\n「{payload.target.name}({payload.target.user_id})」"
+                f"\n「{payload.target.name}」"
             )
             themed = await self._render_user_card(
                 payload.target,

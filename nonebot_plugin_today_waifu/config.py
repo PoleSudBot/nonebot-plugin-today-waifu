@@ -30,7 +30,7 @@ class Config(BaseModel):
     today_waifu_report_hour: int = 23
     today_waifu_report_minute: int = 59
     today_waifu_global_milestone_notify: bool = False
-    today_waifu_bot_pick_probability: float = 0.03
+    today_waifu_bot_pick_probability: float = 0.015
 
     @field_validator(
         "today_waifu_default_limit_times",

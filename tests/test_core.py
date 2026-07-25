@@ -367,8 +367,8 @@ def test_inject_orm_database_url_prefers_existing(monkeypatch):
     assert config.sqlalchemy_database_url == "sqlite+aiosqlite://"
 
 
-def test_bot_pick_probability_default_is_three_percent():
-    assert plugin_config.today_waifu_bot_pick_probability == 0.03
+def test_bot_pick_probability_default_is_one_point_five_percent():
+    assert plugin_config.today_waifu_bot_pick_probability == 0.015
 
 
 def test_get_today_waifu_reports_missing_member_query_interface(monkeypatch):
@@ -381,7 +381,7 @@ def test_get_today_waifu_reports_missing_member_query_interface(monkeypatch):
     assert "无法获取群成员列表" in str(message)
 
 
-def test_relation_message_wraps_target_identity_with_corner_brackets():
+def test_relation_message_wraps_target_name_with_corner_brackets():
     service = TodayWaifuService()
     payload = app_module.RelationMessage(
         text="你今天的老婆是：",
@@ -395,8 +395,8 @@ def test_relation_message_wraps_target_identity_with_corner_brackets():
 
     message = asyncio.run(service._build_relation_message(payload))
 
-    assert "「Alice(2002)」" in str(message)
-    assert "\nAlice(2002)" not in str(message)
+    assert "「Alice」" in str(message)
+    assert "2002" not in str(message)
 
 
 def test_theme_selection_and_local_assets():

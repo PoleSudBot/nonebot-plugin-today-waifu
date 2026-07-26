@@ -59,5 +59,5 @@ def build_theme_payload(theme_key: str) -> dict:
     return get_theme_module(theme_key).build_payload()
 
 
-def build_theme_context(theme_key: str, payload: dict) -> dict:
-    return get_theme_module(theme_key).build_context(payload)
+def build_theme_render_spec(theme_key: str, payload: dict):
+    return get_theme_module(theme_key).build_render_spec(payload)

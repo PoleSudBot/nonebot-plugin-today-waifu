@@ -3,16 +3,13 @@ from __future__ import annotations
 import random
 from typing import Any
 
-from PIL.Image import Image as PILImage
-
 from ..config import PJSK_ASSET_DIR
 from .common import (
-    OverlaySpec,
     OUTPUT_SIZE,
-    RoundedRectClipSpec,
+    OverlaySpec,
+    RoundedRectCropSpec,
     ThemeCardSpec,
     choose_by_weight,
-    render_card_by_spec,
 )
 
 KEY = "pjsk"
@@ -48,7 +45,7 @@ def build_payload() -> dict[str, Any]:
     }
 
 
-def build_context(payload: dict[str, Any]) -> dict[str, Any]:
+def build_render_spec(payload: dict[str, Any]) -> ThemeCardSpec:
     rarity = payload["rarity"]
     frame_name = {
         "3": "frame_rarity_3.png",
@@ -60,46 +57,32 @@ def build_context(payload: dict[str, Any]) -> dict[str, Any]:
         star_render_count = 1
     elif payload["training_state"] == "after_training":
         star_name = "rarity-star-after-training.png"
-        star_render_count = payload["star_count"]
+        star_render_count = int(payload["star_count"])
     else:
         star_name = "rare_star_normal.png"
-        star_render_count = payload["star_count"]
-    context = {
-        "output_size": OUTPUT_SIZE,
-        "frame_path": PJSK_ASSET_DIR / frame_name,
-        "attr_path": PJSK_ASSET_DIR / f"attr_{payload['attribute']}.png",
-        "star_path": PJSK_ASSET_DIR / star_name,
-        "star_count": payload["star_count"],
-        "star_render_count": star_render_count,
-    }
-    return {**context, "render_spec": build_render_spec(context)}
+        star_render_count = int(payload["star_count"])
 
-
-def build_render_spec(theme_data: dict[str, Any]) -> ThemeCardSpec:
-    star_render_count = int(theme_data.get("star_render_count", theme_data["star_count"]))
     return ThemeCardSpec(
         base_canvas_size=BASE_CANVAS_SIZE,
         avatar_box=(0, 0, CARD_SIZE, CARD_SIZE),
-        output_size=int(theme_data.get("output_size", OUTPUT_SIZE)),
-        # Match bangdream's shallower corner proportion, but keep a smooth geometric curve.
-        post_clip=RoundedRectClipSpec(box=(0, 0, CARD_SIZE, CARD_SIZE), radius=8),
+        output_size=OUTPUT_SIZE,
         overlays=(
             OverlaySpec(
-                path=theme_data["frame_path"],
+                path=PJSK_ASSET_DIR / frame_name,
                 size=(CARD_SIZE, CARD_SIZE),
             ),
             OverlaySpec(
-                path=theme_data["attr_path"],
+                path=PJSK_ASSET_DIR / f"attr_{payload['attribute']}.png",
                 size=(ATTR_SIZE, ATTR_SIZE),
             ),
             OverlaySpec(
-                path=theme_data["star_path"],
+                path=PJSK_ASSET_DIR / star_name,
                 positions=STAR_POSITIONS[:star_render_count],
                 size=(STAR_SIZE, STAR_SIZE),
             ),
         ),
+        final_crop=RoundedRectCropSpec(
+            box=(0, 0, CARD_SIZE, CARD_SIZE),
+            radius=8,
+        ),
     )
-
-
-def render_card(avatar: PILImage, theme_data: dict[str, Any]) -> PILImage:
-    return render_card_by_spec(avatar, build_render_spec(theme_data))

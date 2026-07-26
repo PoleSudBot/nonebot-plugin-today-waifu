@@ -1,10 +1,15 @@
+from .avatar import AvatarRef
 from .card_renderer import compose_theme_card, render_theme_card
-from .engine import render_template_image
-from .runtime import close_theme_card_client
+from .report_renderer import FateReport, ReportCard, render_fate_report
+from .roster_renderer import RosterPair, render_cp_roster
 
 __all__ = [
-    "close_theme_card_client",
+    "AvatarRef",
+    "FateReport",
+    "ReportCard",
+    "RosterPair",
     "compose_theme_card",
-    "render_template_image",
+    "render_cp_roster",
+    "render_fate_report",
     "render_theme_card",
 ]

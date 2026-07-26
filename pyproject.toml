@@ -1,6 +1,6 @@
 [project]
 name = "nonebot-plugin-today-waifu"
-version = "0.2.0"
+version = "0.3.0"
 description = "NoneBot2 今日老婆插件，支持纯爱模式、主题卡面与缘分刊物"
 authors = [
     { name = "k1yuyu", email = "1163272259@qq.com" }
@@ -17,10 +17,8 @@ dependencies = [
     "nonebot-plugin-alconna (>=0.56.2,<1.0.0)",
     "nonebot-plugin-uninfo (>=0.7.0,<1.0.0)",
     "nonebot-plugin-orm (>=0.7.6,<1.0.0)",
-    "nonebot-plugin-htmlrender (>=0.6.2,<1.0.0)",
     "nonebot-plugin-apscheduler (>=0.5.0,<1.0.0)",
-    "jinja2 (>=3.1.0,<4.0.0)",
-    "Pillow (>=10.0.0,<12.0.0)",
+    "Pillow (>=11.0.0,<12.0.0)",
 ]
 
 

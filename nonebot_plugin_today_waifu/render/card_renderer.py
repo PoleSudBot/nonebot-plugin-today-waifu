@@ -1,41 +1,35 @@
 from __future__ import annotations
 
-from io import BytesIO
+import asyncio
 from typing import Any
 
-from nonebot.utils import run_sync
-from PIL import Image
-from PIL.Image import Image as PILImage
-
-from ..theme_kits import get_theme_module
 from ..theme_kits.common import render_card_by_spec
-from .runtime import get_avatar_bytes
+from ..themes import build_theme_render_spec
+from .avatar import AvatarRef, AvatarSource, load_avatar_image, resolve_avatar_source
+from .style import image_to_png
 
 
-def _open_image(image_bytes: bytes) -> PILImage:
-    with Image.open(BytesIO(image_bytes)) as image:
-        return image.convert("RGBA")
-
-
-def compose_theme_card(avatar_bytes: bytes, theme_key: str, theme_data: dict) -> bytes:
-    avatar = _open_image(avatar_bytes)
-    module = get_theme_module(theme_key)
-    spec = None
-    if hasattr(module, "build_render_spec"):
-        spec = module.build_render_spec(theme_data)
-    elif theme_data.get("render_spec") is not None:
-        spec = theme_data["render_spec"]
-    image = render_card_by_spec(avatar, spec) if spec is not None else module.render_card(avatar, theme_data)
-
-    output = BytesIO()
-    image.save(output, format="PNG")
-    return output.getvalue()
+def compose_theme_card(
+    avatar_source: AvatarSource,
+    theme_key: str,
+    payload: dict[str, Any],
+) -> bytes:
+    avatar = load_avatar_image(avatar_source)
+    image = render_card_by_spec(avatar, build_theme_render_spec(theme_key, payload))
+    return image_to_png(image)
 
 
 async def render_theme_card(
-    avatar_url: str,
+    avatar_ref: AvatarRef,
     theme_key: str,
-    theme_data: dict[str, Any],
+    payload: dict[str, Any],
 ) -> bytes:
-    avatar_bytes = await get_avatar_bytes(avatar_url)
-    return await run_sync(compose_theme_card)(avatar_bytes, theme_key, theme_data)
+    avatar_source = await resolve_avatar_source(avatar_ref)
+    if avatar_source is None:
+        raise ValueError(f"avatar unavailable: {avatar_ref.user_id}")
+    return await asyncio.to_thread(
+        compose_theme_card,
+        avatar_source,
+        theme_key,
+        payload,
+    )

@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import os
-import sys
-
-from nonebot import get_driver, on_type, require
+from nonebot import on_type, require
 from nonebot.adapters import Bot, Event
 from nonebot.adapters.onebot.v11 import (
     GroupDecreaseNoticeEvent,
@@ -15,16 +12,11 @@ from nonebot.plugin import PluginMetadata, inherit_supported_adapters
 from .bootstrap import inject_orm_database_url
 from .config import Config
 from .constants import ReportBucket
-from .render.runtime import close_theme_card_client
 from .texts import HELP_TEXT
-
-_TEST_MODE = bool(os.environ.get("PYTEST_CURRENT_TEST")) or "pytest" in sys.modules
 
 inject_orm_database_url()
 
 require("nonebot_plugin_orm")
-if not _TEST_MODE:
-    require("nonebot_plugin_htmlrender")
 require("nonebot_plugin_apscheduler")
 require("nonebot_plugin_alconna")
 require("nonebot_plugin_uninfo")
@@ -49,11 +41,9 @@ __plugin_meta__ = PluginMetadata(
     ),
     extra={
         "author": "k1yuyu",
-        "version": "0.2.0",
+        "version": "0.3.0",
     },
 )
-
-driver = get_driver()
 
 
 @event_postprocessor
@@ -75,16 +65,6 @@ async def _(bot: Bot, event: GroupIncreaseNoticeEvent):
 @group_member_decrease.handle()
 async def _(event: GroupDecreaseNoticeEvent):
     await waifu_service.handle_member_leave(str(event.group_id), str(event.user_id))
-
-
-@driver.on_startup
-async def _startup() -> None:
-    return None
-
-
-@driver.on_shutdown
-async def _shutdown() -> None:
-    await close_theme_card_client()
 
 
 @scheduler.scheduled_job(

@@ -23,23 +23,9 @@ _✨ 随机抽取群友作为老婆吧！ ✨_
 
 ## 📖 介绍
 
-### 注意！！！0.1.6版本进行了重构以适配nonebot2新版本，pydantic升级到v2，存在破坏性改动：
+本分支是面向真寻 Bot 的本地适配版本，依赖真寻的配置、头像缓存、网络和 Pillow 绘图基础设施，不再支持作为独立 NoneBot 插件安装。
 
-### 将不兼容历史的记录，所有群配置需要重新设置；
-
-### python版本从3.8升级到3.9，和nonebot2保持同步，虽然本插件仍采用了兼容3.8的写法，但不保证能正常运行。
-
-本插件自 **v0.1.9** 起兼容了 Pydantic v1 与 v2 版本<br/>
-如果在使用的过程中遇到 Pydantic 相关警告或与其他依赖v1的插件冲突导致的报错，例如：
-
-    pydantic_core._pydantic_core.ValidationError: 1 validation error for Config
-    Input should be a valid dictionary or instance of Config [type=model_type, input_value=Config(...), input_type=Config]
-
-请考虑降级 Pydantic 至 v1 版本：
-
-    pip install --force-reinstall 'pydantic~=1.10'
-
-一个能每天随机抓取群友作为老婆的插件
+插件可以每天随机抽取群友作为老婆，并提供纯爱模式、主题卡面、CP 花名册和周/月/年缘分报告。
 
 每天会重置记录（根据本地时间判断）
 
@@ -47,8 +33,15 @@ _✨ 随机抽取群友作为老婆吧！ ✨_
 
 如果剩余成员列表为空则默认机器人本身为老婆
 
-适配多平台，依赖[nonebot_plugin_alconna](https://github.com/nonebot/plugin-alconna)、
-[nonebot_plugin_uninfo](https://github.com/RF-Tar-Railt/nonebot-plugin-uninfo)，具体参考对应插件文档。【0.1.6版本新增】
+会话信息由 [nonebot_plugin_alconna](https://github.com/nonebot/plugin-alconna) 与
+[nonebot_plugin_uninfo](https://github.com/RF-Tar-Railt/nonebot-plugin-uninfo) 提供。QQ 用户头像优先复用真寻的 `data/cache/avatars` 缓存，其他平台或缓存不可用时回退会话提供的头像 URL。
+
+### Pillow 绘图
+
+- BangDream、PJSK 主题卡统一执行“完整头像 → 边框与图标 → 最终裁剪”，不提前裁切头像。
+- BangDream 根据封闭边框生成最终轮廓，PJSK 保留最终圆角裁剪。
+- CP 花名册和缘分报告使用真寻 PSB 粉白色板与 HarmonyOS Sans SC 字体绘制。
+- 整个插件不再依赖 Jinja2、HTMLRender 或 Playwright 生成图片。
 
 #### \>>换老婆功能
 
@@ -91,92 +84,32 @@ _✨ 随机抽取群友作为老婆吧！ ✨_
 
 ## 💿 安装
 
-<details>
-<summary>使用 nb-cli 安装</summary>
-在 nonebot2 项目的根目录下打开命令行, 输入以下指令即可安装
+插件由 Bot 父仓通过 editable source 接入：
 
-    nb plugin install nonebot-plugin-today-waifu
+```toml
+[tool.uv.sources]
+nonebot-plugin-today-waifu = { path = "plugins/nonebot-plugin-today-waifu", editable = true }
+```
 
-</details>
-
-<details>
-<summary>使用包管理器安装</summary>
-在 nonebot2 项目的插件目录下, 打开命令行, 根据你使用的包管理器, 输入相应的安装命令
-
-<details>
-<summary>pip</summary>
-
-    pip install nonebot-plugin-today-waifu
-
-</details>
-<details>
-<summary>pdm</summary>
-
-    pdm add nonebot-plugin-today-waifu
-
-</details>
-<details>
-<summary>poetry</summary>
-
-    poetry add nonebot-plugin-today-waifu
-
-</details>
-<details>
-<summary>conda</summary>
-
-    conda install nonebot-plugin-today-waifu
-
-</details>
-
-打开 nonebot2 项目根目录下的 `pyproject.toml` 文件, 在 `[tool.nonebot]` 部分追加写入
-
-    plugins = ["nonebot_plugin_today_waifu"]
-
-</details>
+在 Bot 仓库根目录执行 `uv sync`，插件由 `bot.py` / `plugins.txt` 的既有加载流程管理。
 
 ## ⚙️ 配置
 
 在 nonebot2 项目的`.env`文件中添加下表中的配置，实际上**都可以不填写**
 
-### 全局配置项：
+| 配置项 | 默认值 | 说明 |
+|:--|:--:|:--|
+| `TODAY_WAIFU_ALIASES` | `[]` | 今日老婆命令别名 |
+| `TODAY_WAIFU_BAN_ID_LIST` | `[]` | 不参与抽取的用户 ID |
+| `TODAY_WAIFU_DEFAULT_CHANGE_WAIFU` | `true` | 新群默认允许换老婆 |
+| `TODAY_WAIFU_DEFAULT_LIMIT_TIMES` | `2` | 默认换老婆次数 |
+| `TODAY_WAIFU_DEFAULT_SELECT_MODE` | `active` | 默认抽取模式：`random` / `active` |
+| `TODAY_WAIFU_DEFAULT_ACTIVE_DAYS` | `3` | 活跃模式统计天数 |
+| `TODAY_WAIFU_MEMBER_CACHE_TTL_SECONDS` | `1800` | 群成员资料缓存秒数 |
+| `TODAY_WAIFU_THEME_HTTP_TIMEOUT_SECONDS` | `10` | 非共享缓存头像 URL 回退超时 |
+| `TODAY_WAIFU_BOT_PICK_PROBABILITY` | `0.015` | 有真人候选时抽到 Bot 的彩蛋概率 |
 
-|               配置项                | 必填 | 类型        |  默认值  |                    说明                    |
-|:--------------------------------:|:--:|-----------|:-----:|:----------------------------------------:|
-|    `TODAY_WAIFU_BAN_ID_LIST`     | 否  | List[int] |  []   |               列表内的id不会被抽到                |
-|      `TODAY_WAIFU_ALIASES`       | 否  | List[str] |  []   |  今日老婆插件的别名，允许设置多个即除了"今日老婆"外，也可以用别名触发指令   |
-|     `TODAY_WAIFU_RECORD_DIR`     | 否  | str       |       |      记录保存路径，默认在插件目录下新建record_v2文件夹       |
-|   `TODAY_WAIFU_SUPERUSER_OPT`    | 否  | bool      | false |               是否仅主人可设置换老婆                |
-| `TODAY_WAIFU_GROUP_MEMBER_CACHE` | 否  | bool      | false | 是否缓存群成员信息，默认关闭，当前仅支持OneBot V11协议，其余协议请关闭 |
-
-### 群组配置项（默认）：
-
-|                配置项                 | 必填 | 类型   |  默认值   |                                说明                                |
-|:----------------------------------:|:--:|------|:------:|:----------------------------------------------------------------:|
-| `TODAY_WAIFU_DEFAULT_CHANGE_WAIFU` | 否  | bool |  true  |                         是否默认开启换老婆功能，默认开启                         |
-| `TODAY_WAIFU_DEFAULT_LIMIT_TIMES`  | 否  | int  |   2    |                             允许换老婆次数                              |
-|    `TODAY_WAIFU_AUTO_WITHDRAW`     | 否  | bool | false  |                         是否开启自动撤回功能，默认关闭                          |
-| `TODAY_WAIFU_AUTO_WITHDRAW_DELAY`  | 否  | int  |   5    |                        自动撤回延迟时间，单位为秒，默认5秒                        |
-| `TODAY_WAIFU_AUTO_SET_OTHER_HALF`  | 否  | bool | false  | 如果抽到老婆，是否自动给对方设置<br/>（前提是对方当前没有老婆，并且即使给对方设置，对方也可也继续换老婆）<br/>默认关闭 |
-|     `TODAY_WAIFU_SELECT_MODE`      | 否  | str  | random |       抽取模式，random为随机模式，随机抽取<br/>active为活跃模式，优先选择最近x天发言过的用户       |
-|     `TODAY_WAIFU_ACTIVE_DAYS`      | 否  | int  |   3    |                     活跃天数，默认3天，当选择active模式时生效                     |
-| `TODAY_WAIFU_BOT_PICK_PROBABILITY` | 否  | float | 0.015 |           有真人候选时抽到 bot 的独立彩蛋概率，范围0到1，设为0可关闭           |
-
-    # today-waifu 配置样例
-
-    TODAY_WAIFU_BAN_ID_LIST = [2854196310,123456]
-    TODAY_WAIFU_ALIASES = ["每日老婆","我的老婆"]
-    # TODAY_WAIFU_RECORD_DIR= "" # 一般不需要填写，如果需要请填写绝对路径
-    TODAY_WAIFU_SUPERUSER_OPT = false
-    # TODAY_WAIFU_GROUP_MEMBER_CACHE = false  # 注意：当前仅支持OneBot V11协议，其余协议请关闭
-
-    TODAY_WAIFU_DEFAULT_CHANGE_WAIFU = true
-    TODAY_WAIFU_DEFAULT_LIMIT_TIMES = 2
-    TODAY_WAIFU_AUTO_WITHDRAW = false
-    TODAY_WAIFU_AUTO_WITHDRAW_DELAY = 5
-    TODAY_WAIFU_AUTO_SET_OTHER_HALF = false
-    TODAY_WAIFU_SELECT_MODE = "active"
-    TODAY_WAIFU_ACTIVE_DAYS = 3
-    TODAY_WAIFU_BOT_PICK_PROBABILITY = 0.015
+头像文件缓存由真寻 `avatar_cache` 配置组统一管理，本插件不再维护独立头像 TTL。
 
 ## 🎉 使用
 
@@ -199,7 +132,7 @@ _✨ 随机抽取群友作为老婆吧！ ✨_
 
 ### 效果图
 
-暂无
+开发验证会在临时目录生成 BangDream、PJSK、CP 花名册和缘分报告预览图；预览产物不纳入插件仓库。
 
 ## ✨其他
 
@@ -212,6 +145,7 @@ _✨ 随机抽取群友作为老婆吧！ ✨_
 
 ## 📋版本历史
 
+- 0.3.0 接入真寻 Pillow 绘图与共享头像缓存，统一主题卡最终裁剪，并将 CP 花名册和缘分报告迁出 HTMLRender。
 - 0.1.0 初始版本
 - 0.1.1 更新metadata及修复一些bug
 - 0.1.2 修复每次关闭换老婆状态无法保存bug

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from io import BytesIO
 from pathlib import Path
@@ -16,15 +16,21 @@ from nonebot_plugin_today_waifu.config import plugin_config
 from nonebot_plugin_today_waifu.constants import PairStatus, SelectMode, ThemeScope
 from nonebot_plugin_today_waifu.models import PairCounter, ThemePreference
 from nonebot_plugin_today_waifu.render import (
+    AvatarRef,
+    FateReport,
+    ReportCard,
+    RosterPair,
     compose_theme_card,
+    render_cp_roster,
+    render_fate_report,
     render_theme_card,
 )
+import nonebot_plugin_today_waifu.render.avatar as avatar_module
 import nonebot_plugin_today_waifu.render.card_renderer as card_renderer_module
-import nonebot_plugin_today_waifu.render.runtime as runtime_module
+import nonebot_plugin_today_waifu.render.roster_renderer as roster_renderer_module
 import nonebot_plugin_today_waifu.repositories as repositories_module
 from nonebot_plugin_today_waifu.services import app as app_module
 from nonebot_plugin_today_waifu.services.app import (
-    CP_ROSTER_COLUMNS,
     DisplayUser,
     ThemeRollResult,
     TodayWaifuService,
@@ -33,21 +39,22 @@ from nonebot_plugin_today_waifu.services.app import (
 )
 from nonebot_plugin_today_waifu.theme_kits import bangdream, pjsk
 from nonebot_plugin_today_waifu.theme_kits.common import (
+    ClosedFrameCropSpec,
     OverlaySpec,
-    RoundedRectClipSpec,
+    RoundedRectCropSpec,
     ThemeCardSpec,
-    clone_frame_window_mask,
+    clone_closed_frame_mask,
     clone_overlay_longest_edge,
     clone_overlay_resized,
     clone_overlay_width,
     render_card_by_spec,
 )
 from nonebot_plugin_today_waifu.themes import (
-    build_theme_context,
     build_theme_payload,
+    build_theme_render_spec,
     parse_theme_selection,
 )
-from PIL import Image, ImageChops
+from PIL import Image, ImageChops, ImageDraw
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -252,7 +259,7 @@ def _make_session(
 
 
 def _make_bot(self_id: str = "9999"):
-    return SimpleNamespace(self_id=self_id)
+    return SimpleNamespace(self_id=self_id, basic={"scope": "qq"})
 
 
 def _patch_user_resolution(monkeypatch, service: TodayWaifuService) -> None:
@@ -277,10 +284,6 @@ def _make_avatar_bytes(color: tuple[int, int, int] = (240, 32, 32)) -> bytes:
     buffer = BytesIO()
     image.save(buffer, format="PNG")
     return buffer.getvalue()
-
-
-def _reset_theme_card_runtime() -> None:
-    asyncio.run(runtime_module.close_theme_card_client())
 
 
 def _assert_distribution_close(
@@ -393,7 +396,7 @@ def test_relation_message_wraps_target_name_with_corner_brackets():
         ),
     )
 
-    message = asyncio.run(service._build_relation_message(payload))
+    message = asyncio.run(service._build_relation_message(_make_bot(), payload))
 
     assert "「Alice」" in str(message)
     assert "2002" not in str(message)
@@ -404,7 +407,7 @@ def test_theme_selection_and_local_assets():
     assert parse_theme_selection("none") == []
     assert parse_theme_selection("2,1,2") == ["pjsk", "bangdream"]
 
-    bangdream = build_theme_context(
+    bangdream = build_theme_render_spec(
         "bangdream",
         {
             "attribute": "cool",
@@ -413,7 +416,7 @@ def test_theme_selection_and_local_assets():
             "star_type": "color",
         },
     )
-    pjsk = build_theme_context(
+    pjsk = build_theme_render_spec(
         "pjsk",
         {
             "attribute": "cute",
@@ -423,38 +426,31 @@ def test_theme_selection_and_local_assets():
         },
     )
 
-    assert isinstance(bangdream["border_path"], Path)
-    assert bangdream["border_path"].exists()
-    assert bangdream["star_path"].exists()
-    assert "assets/bangdream" in str(bangdream["border_path"])
-    assert bangdream["render_spec"].output_size == 1024
-    assert bangdream["render_spec"].clip.kind == "frame_window"
-    assert bangdream["render_spec"].post_clip is None
-    assert isinstance(pjsk["frame_path"], Path)
-    assert pjsk["frame_path"].exists()
-    assert "assets/pjsk" in str(pjsk["frame_path"])
-    assert "assets-direct.unipjsk.com" not in str(pjsk["frame_path"])
-    assert pjsk["render_spec"].output_size == 1024
-    assert pjsk["render_spec"].clip is None
-    assert pjsk["render_spec"].post_clip is not None
-    assert pjsk["render_spec"].post_clip.kind == "rounded_rect"
-    assert pjsk["render_spec"].post_clip.box == (0, 0, 156, 156)
-    assert pjsk["render_spec"].post_clip.radius == 8
+    assert bangdream.output_size == 1024
+    assert bangdream.overlays[0].path.exists()
+    assert bangdream.overlays[-1].path.exists()
+    assert "assets/bangdream" in str(bangdream.overlays[0].path)
+    assert isinstance(bangdream.final_crop, ClosedFrameCropSpec)
+    assert bangdream.final_crop.frame_path == bangdream.overlays[0].path
+    assert pjsk.output_size == 1024
+    assert pjsk.overlays[0].path.exists()
+    assert "assets/pjsk" in str(pjsk.overlays[0].path)
+    assert "assets-direct.unipjsk.com" not in str(pjsk.overlays[0].path)
+    assert isinstance(pjsk.final_crop, RoundedRectCropSpec)
+    assert pjsk.final_crop.box == (0, 0, 156, 156)
+    assert pjsk.final_crop.radius == 8
 
 
 def test_bangdream_card_composition():
     avatar_bytes = _make_avatar_bytes()
-    bangdream = build_theme_context(
-        "bangdream",
-        {
-            "attribute": "cool",
-            "band": "ppp",
-            "star_count": 4,
-            "star_type": "color",
-        },
-    )
+    payload = {
+        "attribute": "cool",
+        "band": "ppp",
+        "star_count": 4,
+        "star_type": "color",
+    }
 
-    output = compose_theme_card(avatar_bytes, "bangdream", bangdream)
+    output = compose_theme_card(avatar_bytes, "bangdream", payload)
 
     assert output.startswith(b"\x89PNG")
     with Image.open(BytesIO(output)) as image:
@@ -471,17 +467,14 @@ def test_bangdream_card_composition():
 
 def test_pjsk_card_composition():
     avatar_bytes = _make_avatar_bytes((32, 160, 240))
-    pjsk = build_theme_context(
-        "pjsk",
-        {
-            "attribute": "cute",
-            "rarity": "4",
-            "training_state": "after_training",
-            "star_count": 4,
-        },
-    )
+    payload = {
+        "attribute": "cute",
+        "rarity": "4",
+        "training_state": "after_training",
+        "star_count": 4,
+    }
 
-    output = compose_theme_card(avatar_bytes, "pjsk", pjsk)
+    output = compose_theme_card(avatar_bytes, "pjsk", payload)
 
     assert output.startswith(b"\x89PNG")
     with Image.open(BytesIO(output)) as image:
@@ -500,123 +493,156 @@ def test_pjsk_card_composition():
         assert image.getpixel((111, 900)) != (32, 160, 240, 255)
 
 
-def test_theme_card_client_reuses_single_instance(monkeypatch):
-    class FakeClient:
-        def __init__(self):
-            self.closed = False
+def test_avatar_ref_prefers_zhenxun_cache(monkeypatch, tmp_path: Path):
+    avatar_path = tmp_path / "avatar.png"
+    Image.open(BytesIO(_make_avatar_bytes())).save(avatar_path)
 
-        async def aclose(self):
-            self.closed = True
+    async def _fake_get_avatar_path(platform: str, user_id: str, force_refresh: bool = False):
+        assert (platform, user_id, force_refresh) == ("qq", "1001", False)
+        return avatar_path
 
-    created: list[FakeClient] = []
+    async def _unexpected_http(*args, **kwargs):
+        raise AssertionError("cache hit must not request fallback URL")
 
-    def _fake_create_theme_card_client() -> FakeClient:
-        client = FakeClient()
-        created.append(client)
-        return client
-
-    _reset_theme_card_runtime()
     monkeypatch.setattr(
-        runtime_module,
-        "_create_theme_card_client",
-        _fake_create_theme_card_client,
+        avatar_module,
+        "_get_avatar_service",
+        lambda: SimpleNamespace(get_avatar_path=_fake_get_avatar_path),
+    )
+    monkeypatch.setattr(
+        avatar_module,
+        "_get_http_client",
+        lambda: SimpleNamespace(get_content=_unexpected_http),
     )
 
-    client1 = runtime_module._get_theme_card_client()
-    client2 = runtime_module._get_theme_card_client()
-
-    assert client1 is client2
-    assert len(created) == 1
-
-    _reset_theme_card_runtime()
-    assert created[0].closed is True
+    ref = AvatarRef("qq", "1001", "https://example.com/avatar.png")
+    assert asyncio.run(avatar_module.resolve_avatar_source(ref)) == avatar_path
 
 
-def test_get_avatar_bytes_uses_ttl_cache(monkeypatch):
-    _reset_theme_card_runtime()
-    monkeypatch.setattr(
-        plugin_config,
-        "today_waifu_theme_avatar_cache_ttl_seconds",
-        300,
-    )
+def test_avatar_refs_deduplicate_url_fallback(monkeypatch):
     call_count = 0
 
-    async def _fake_fetch_avatar_bytes(url: str) -> bytes:
+    async def _missing_cache(*args, **kwargs):
+        return None
+
+    async def _fake_get_content(url: str, **kwargs) -> bytes:
         nonlocal call_count
         call_count += 1
-        return f"avatar:{url}".encode()
+        assert url == "https://example.com/avatar.png"
+        return _make_avatar_bytes()
 
-    monkeypatch.setattr(runtime_module, "_fetch_avatar_bytes", _fake_fetch_avatar_bytes)
-
-    async def _run() -> tuple[bytes, bytes]:
-        first = await runtime_module.get_avatar_bytes("https://example.com/avatar.png")
-        second = await runtime_module.get_avatar_bytes("https://example.com/avatar.png")
-        return first, second
-
-    first, second = asyncio.run(_run())
-
-    assert first == second == b"avatar:https://example.com/avatar.png"
-    assert call_count == 1
-    _reset_theme_card_runtime()
-
-
-def test_get_avatar_bytes_deduplicates_inflight_requests(monkeypatch):
-    _reset_theme_card_runtime()
     monkeypatch.setattr(
-        plugin_config,
-        "today_waifu_theme_avatar_cache_ttl_seconds",
-        300,
+        avatar_module,
+        "_get_avatar_service",
+        lambda: SimpleNamespace(get_avatar_path=_missing_cache),
     )
-    call_count = 0
-    started = asyncio.Event()
-    release = asyncio.Event()
+    monkeypatch.setattr(
+        avatar_module,
+        "_get_http_client",
+        lambda: SimpleNamespace(get_content=_fake_get_content),
+    )
 
-    async def _fake_fetch_avatar_bytes(url: str) -> bytes:
-        nonlocal call_count
-        call_count += 1
-        started.set()
-        await release.wait()
-        return f"inflight:{url}".encode()
+    ref = AvatarRef("unknown", "1001", "https://example.com/avatar.png")
+    sources = asyncio.run(avatar_module.resolve_avatar_sources([ref, ref]))
 
-    monkeypatch.setattr(runtime_module, "_fetch_avatar_bytes", _fake_fetch_avatar_bytes)
-
-    async def _run() -> tuple[bytes, bytes]:
-        first_task = asyncio.create_task(
-            runtime_module.get_avatar_bytes("https://example.com/avatar.png")
-        )
-        await started.wait()
-        second_task = asyncio.create_task(
-            runtime_module.get_avatar_bytes("https://example.com/avatar.png")
-        )
-        release.set()
-        return await asyncio.gather(first_task, second_task)
-
-    first, second = asyncio.run(_run())
-
-    assert first == second == b"inflight:https://example.com/avatar.png"
+    assert sources[ref].startswith(b"\x89PNG")
     assert call_count == 1
-    _reset_theme_card_runtime()
+
+
+def test_avatar_ref_refreshes_corrupt_cache_once(monkeypatch, tmp_path: Path):
+    corrupt_path = tmp_path / "corrupt.png"
+    corrupt_path.write_bytes(b"not-an-image")
+    refreshed_path = tmp_path / "refreshed.png"
+    refreshed_path.write_bytes(_make_avatar_bytes())
+    calls: list[bool] = []
+
+    async def _fake_get_avatar_path(platform: str, user_id: str, force_refresh: bool = False):
+        calls.append(force_refresh)
+        return refreshed_path if force_refresh else corrupt_path
+
+    monkeypatch.setattr(
+        avatar_module,
+        "_get_avatar_service",
+        lambda: SimpleNamespace(get_avatar_path=_fake_get_avatar_path),
+    )
+
+    ref = AvatarRef("qq", "1001")
+    assert asyncio.run(avatar_module.resolve_avatar_source(ref)) == refreshed_path
+    assert calls == [False, True]
+
+
+def test_avatar_cache_failure_falls_back_to_url(monkeypatch):
+    async def _failed_cache(*args, **kwargs):
+        raise OSError("cache unavailable")
+
+    async def _fake_get_content(url: str, **kwargs) -> bytes:
+        assert url == "https://example.com/avatar.png"
+        return _make_avatar_bytes()
+
+    monkeypatch.setattr(
+        avatar_module,
+        "_get_avatar_service",
+        lambda: SimpleNamespace(get_avatar_path=_failed_cache),
+    )
+    monkeypatch.setattr(
+        avatar_module,
+        "_get_http_client",
+        lambda: SimpleNamespace(get_content=_fake_get_content),
+    )
+
+    ref = AvatarRef("qq", "1001", "https://example.com/avatar.png")
+    source = asyncio.run(avatar_module.resolve_avatar_source(ref))
+
+    assert isinstance(source, bytes)
+    assert source.startswith(b"\x89PNG")
+
+
+def test_avatar_invalid_url_fallback_returns_none(monkeypatch):
+    async def _missing_cache(*args, **kwargs):
+        return None
+
+    async def _invalid_image(*args, **kwargs) -> bytes:
+        return b"not-an-image"
+
+    monkeypatch.setattr(
+        avatar_module,
+        "_get_avatar_service",
+        lambda: SimpleNamespace(get_avatar_path=_missing_cache),
+    )
+    monkeypatch.setattr(
+        avatar_module,
+        "_get_http_client",
+        lambda: SimpleNamespace(get_content=_invalid_image),
+    )
+
+    ref = AvatarRef("qq", "1001", "https://example.com/avatar.png")
+    assert asyncio.run(avatar_module.resolve_avatar_source(ref)) is None
 
 
 def test_render_theme_card_async_path_returns_png(monkeypatch):
     avatar_bytes = _make_avatar_bytes()
-    theme_data = build_theme_context(
-        "bangdream",
-        {
-            "attribute": "cool",
-            "band": "ppp",
-            "star_count": 4,
-            "star_type": "color",
-        },
-    )
+    payload = {
+        "attribute": "cool",
+        "band": "ppp",
+        "star_count": 4,
+        "star_type": "color",
+    }
 
-    async def _fake_get_avatar_bytes(url: str) -> bytes:
+    async def _fake_resolve_avatar_source(ref: AvatarRef) -> bytes:
         return avatar_bytes
 
-    monkeypatch.setattr(card_renderer_module, "get_avatar_bytes", _fake_get_avatar_bytes)
+    monkeypatch.setattr(
+        card_renderer_module,
+        "resolve_avatar_source",
+        _fake_resolve_avatar_source,
+    )
 
     output = asyncio.run(
-        render_theme_card("https://example.com/avatar.png", "bangdream", theme_data)
+        render_theme_card(
+            AvatarRef("qq", "1001", "https://example.com/avatar.png"),
+            "bangdream",
+            payload,
+        )
     )
 
     assert output.startswith(b"\x89PNG")
@@ -654,32 +680,150 @@ def test_scaled_overlay_helpers_return_independent_copies():
     assert width_fixed.width == 32
 
 
-def test_bangdream_frame_window_masks_are_stable():
+def test_bangdream_closed_frame_masks_preserve_frame_and_interior():
     asset_dir = (
         Path(__file__).resolve().parents[1]
         / "nonebot_plugin_today_waifu"
         / "assets"
         / "bangdream"
     )
-    expected_pixels = {
-        "card-3.png": 25016,
-        "card-4.png": 25016,
-        "card-5.png": 24970,
-    }
+    for name in ("card-3.png", "card-4.png", "card-5.png"):
+        frame_path = asset_dir / name
+        with Image.open(frame_path) as frame:
+            source_alpha = frame.getchannel("A").tobytes()
+        mask = clone_closed_frame_mask(frame_path)
+        mask_alpha = mask.tobytes()
 
-    for name, pixel_count in expected_pixels.items():
-        mask = clone_frame_window_mask(asset_dir / name)
         assert mask.size == (180, 180)
-        assert mask.getbbox() == (8, 8, 172, 172)
-        assert mask.getpixel((0, 0)) == 0
         assert mask.getpixel((90, 90)) == 255
-        assert sum(1 for value in mask.getdata() if value) == pixel_count
+        assert all(
+            mask_value >= source_value
+            for source_value, mask_value in zip(source_alpha, mask_alpha)
+        )
+        assert any(value == 0 for value in mask_alpha)
+        assert any(0 < value < 255 for value in mask_alpha)
+        assert any(
+            0 < source_value < 255 and mask_value == source_value
+            for source_value, mask_value in zip(source_alpha, mask_alpha)
+        )
+        assert any(
+            0 < source_value < 255 and mask_value == 255
+            for source_value, mask_value in zip(source_alpha, mask_alpha)
+        )
 
 
-def test_post_clip_applies_after_overlays(tmp_path: Path):
-    overlay_path = tmp_path / "overlay.png"
-    overlay = Image.new("RGBA", (100, 100), (48, 96, 240, 255))
-    overlay.save(overlay_path)
+def test_closed_frame_gray_hole_fill_preserves_outer_alpha_and_fills_inner(tmp_path: Path):
+    frame_path = tmp_path / "gray-frame.png"
+    frame = Image.new("RGBA", (9, 9))
+    draw = ImageDraw.Draw(frame)
+    draw.rectangle((1, 1, 7, 7), outline=(255, 255, 255, 64), width=1)
+    draw.rectangle((2, 2, 6, 6), outline=(255, 255, 255, 255), width=1)
+    draw.rectangle((3, 3, 5, 5), outline=(255, 255, 255, 64), width=1)
+    frame.save(frame_path)
+
+    mask = clone_closed_frame_mask(frame_path)
+
+    assert mask.getpixel((0, 4)) == 0
+    assert mask.getpixel((1, 4)) == 64
+    assert mask.getpixel((2, 4)) == 255
+    assert mask.getpixel((3, 4)) == 255
+    assert mask.getpixel((4, 4)) == 255
+
+    image = render_card_by_spec(
+        Image.new("RGBA", (9, 9), (240, 48, 48, 255)),
+        ThemeCardSpec(
+            base_canvas_size=9,
+            avatar_box=(0, 0, 9, 9),
+            output_size=9,
+            overlays=(OverlaySpec(path=frame_path, size=(9, 9)),),
+            final_crop=ClosedFrameCropSpec(frame_path=frame_path),
+        ),
+    )
+
+    assert image.getpixel((0, 4))[3] == 0
+    assert image.getpixel((1, 4))[3] == 64
+    assert image.getpixel((3, 4))[3] == 255
+    assert image.getpixel((4, 4))[3] == 255
+
+
+def test_bangdream_all_frames_render_icons_inside_closed_crop():
+    avatar = Image.open(BytesIO(_make_avatar_bytes())).convert("RGBA")
+    for star_count in (3, 4, 5):
+        spec = bangdream.build_render_spec(
+            {
+                "attribute": "cool",
+                "band": "ppp",
+                "star_count": star_count,
+                "star_type": "color",
+            }
+        )
+        image = render_card_by_spec(avatar, spec)
+        uncropped = render_card_by_spec(avatar, replace(spec, final_crop=None))
+        frame_only = render_card_by_spec(
+            avatar,
+            replace(spec, overlays=spec.overlays[:1]),
+        )
+
+        final_mask = clone_closed_frame_mask(spec.final_crop.frame_path).resize(
+            image.size,
+            Image.Resampling.LANCZOS,
+        )
+
+        assert image.getpixel((512, 512)) == (240, 32, 32, 255)
+        for point in ((0, 0), (1023, 0), (0, 1023), (1023, 1023)):
+            assert image.getpixel(point)[3] == 0
+        assert any(0 < alpha < 255 for alpha in image.getchannel("A").getdata())
+        assert image.getchannel("A").tobytes() == final_mask.tobytes()
+
+        opaque_keep = final_mask.point(lambda value: 255 if value == 255 else 0)
+        opaque_difference = ImageChops.difference(image, uncropped)
+        assert Image.composite(
+            opaque_difference,
+            Image.new("RGBA", image.size),
+            opaque_keep,
+        ).getbbox() is None
+
+        scale = spec.output_size / bangdream.BASE_CANVAS_SIZE
+        icon_boxes = [
+            (
+                round(bangdream.ATTR_XY[0] * scale),
+                round(bangdream.ATTR_XY[1] * scale),
+                round((bangdream.ATTR_XY[0] + bangdream.ATTR_SIZE) * scale),
+                round((bangdream.ATTR_XY[1] + bangdream.ATTR_SIZE) * scale),
+            ),
+            (0, 0, 300, 300),
+        ]
+        icon_boxes.extend(
+            (
+                0,
+                round((bangdream.STAR_Y - index * bangdream.STAR_STEP) * scale),
+                round(220 * scale),
+                round(
+                    (bangdream.STAR_Y - index * bangdream.STAR_STEP + 200)
+                    * scale
+                ),
+            )
+            for index in range(star_count)
+        )
+        for box in icon_boxes:
+            diff = ImageChops.difference(
+                image.crop(box).convert("RGB"),
+                frame_only.crop(box).convert("RGB"),
+            )
+            assert diff.getbbox() is not None
+
+
+def test_final_crop_applies_after_overlays(tmp_path: Path):
+    frame_path = tmp_path / "frame.png"
+    frame = Image.new("RGBA", (100, 100))
+    ImageDraw.Draw(frame).rectangle(
+        (10, 10, 89, 89),
+        outline=(48, 96, 240, 255),
+        width=10,
+    )
+    frame.save(frame_path)
+    icon_path = tmp_path / "icon.png"
+    Image.new("RGBA", (20, 20), (48, 220, 96, 255)).save(icon_path)
 
     avatar = Image.new("RGBA", (100, 100), (240, 48, 48, 255))
     image = render_card_by_spec(
@@ -688,19 +832,25 @@ def test_post_clip_applies_after_overlays(tmp_path: Path):
             base_canvas_size=100,
             avatar_box=(0, 0, 100, 100),
             output_size=100,
-            overlays=(OverlaySpec(path=overlay_path, size=(100, 100)),),
-            post_clip=RoundedRectClipSpec(box=(10, 10, 80, 80), radius=12),
+            overlays=(
+                OverlaySpec(path=frame_path, size=(100, 100)),
+                OverlaySpec(path=icon_path, positions=((40, 40),), size=(20, 20)),
+            ),
+            final_crop=RoundedRectCropSpec(box=(10, 10, 80, 80), radius=12),
         ),
     )
 
-    assert image.getpixel((50, 50)) == (48, 96, 240, 255)
+    assert image.getpixel((30, 30)) == (240, 48, 48, 255)
+    assert image.getpixel((12, 50))[:3] == (48, 96, 240)
+    assert image.getpixel((12, 50))[3] >= 254
+    assert image.getpixel((50, 50)) == (48, 220, 96, 255)
     assert image.getpixel((5, 5))[3] == 0
     assert image.getpixel((95, 5))[3] == 0
     assert image.getpixel((5, 95))[3] == 0
     assert image.getpixel((95, 95))[3] == 0
 
 
-def test_post_clip_rounded_rect_mask_is_antialiased():
+def test_final_crop_rounded_rect_mask_is_antialiased():
     avatar = Image.new("RGBA", (100, 100), (240, 48, 48, 255))
     image = render_card_by_spec(
         avatar,
@@ -708,7 +858,7 @@ def test_post_clip_rounded_rect_mask_is_antialiased():
             base_canvas_size=100,
             avatar_box=(0, 0, 100, 100),
             output_size=100,
-            post_clip=RoundedRectClipSpec(box=(10, 10, 80, 80), radius=12),
+            final_crop=RoundedRectCropSpec(box=(10, 10, 80, 80), radius=12),
         ),
     )
 
@@ -734,7 +884,7 @@ def test_bangdream_payload_branches(monkeypatch):
         monkeypatch.setattr(bangdream, "choose_by_weight", lambda options: next(picks))
 
         payload = build_theme_payload("bangdream")
-        context = build_theme_context("bangdream", payload)
+        spec = build_theme_render_spec("bangdream", payload)
 
         assert payload == {
             "attribute": "cool",
@@ -742,11 +892,12 @@ def test_bangdream_payload_branches(monkeypatch):
             "star_count": star_count,
             "star_type": star_type,
         }
-        assert context["border_path"].name == border_name
-        assert context["attr_path"].name == "cool.png"
-        assert context["band_path"].name == "ppp.png"
-        assert context["star_path"].name == star_name
-        assert context["star_count"] == star_count
+        assert spec.overlays[0].path.name == border_name
+        assert spec.overlays[1].path.name == "cool.png"
+        assert spec.overlays[2].path.name == "ppp.png"
+        assert spec.overlays[3].path.name == star_name
+        assert spec.overlays[3].positions[0] == (20, 800)
+        assert len(spec.overlays[3].positions) == star_count
 
 
 def test_pjsk_payload_branches(monkeypatch):
@@ -762,7 +913,7 @@ def test_pjsk_payload_branches(monkeypatch):
         monkeypatch.setattr(pjsk, "choose_by_weight", lambda options: next(picks))
 
         payload = build_theme_payload("pjsk")
-        context = build_theme_context("pjsk", payload)
+        spec = build_theme_render_spec("pjsk", payload)
 
         assert payload == {
             "attribute": "cute",
@@ -770,26 +921,22 @@ def test_pjsk_payload_branches(monkeypatch):
             "training_state": training_state,
             "star_count": star_count,
         }
-        assert context["frame_path"].name == frame_name
-        assert context["attr_path"].name == "attr_cute.png"
-        assert context["star_path"].name == star_name
-        assert context["star_count"] == star_count
-        assert context["star_render_count"] == star_render_count
+        assert spec.overlays[0].path.name == frame_name
+        assert spec.overlays[1].path.name == "attr_cute.png"
+        assert spec.overlays[2].path.name == star_name
+        assert len(spec.overlays[2].positions) == star_render_count
 
 
-def test_pjsk_post_clip_rounds_card_corners():
+def test_pjsk_final_crop_rounds_card_corners():
     avatar_bytes = _make_avatar_bytes((32, 160, 240))
-    theme_data = build_theme_context(
-        "pjsk",
-        {
-            "attribute": "cute",
-            "rarity": "4",
-            "training_state": "after_training",
-            "star_count": 4,
-        },
-    )
+    payload = {
+        "attribute": "cute",
+        "rarity": "4",
+        "training_state": "after_training",
+        "star_count": 4,
+    }
 
-    output = compose_theme_card(avatar_bytes, "pjsk", theme_data)
+    output = compose_theme_card(avatar_bytes, "pjsk", payload)
 
     with Image.open(BytesIO(output)) as image:
         for point in ((0, 0), (1023, 0), (0, 1023), (1023, 1023)):
@@ -808,19 +955,16 @@ def test_pjsk_post_clip_rounds_card_corners():
             assert thumbnail_on_white.getpixel(point) != (255, 255, 255, 255)
 
 
-def test_pjsk_birthday_post_clip_preserves_badge_and_attr():
+def test_pjsk_birthday_final_crop_preserves_badge_and_attr():
     avatar_bytes = _make_avatar_bytes((32, 160, 240))
-    theme_data = build_theme_context(
-        "pjsk",
-        {
-            "attribute": "happy",
-            "rarity": "birthday",
-            "training_state": "normal",
-            "star_count": 4,
-        },
-    )
+    payload = {
+        "attribute": "happy",
+        "rarity": "birthday",
+        "training_state": "normal",
+        "star_count": 4,
+    }
 
-    output = compose_theme_card(avatar_bytes, "pjsk", theme_data)
+    output = compose_theme_card(avatar_bytes, "pjsk", payload)
 
     with Image.open(BytesIO(output)) as image:
         for point in ((0, 0), (1023, 0), (0, 1023), (1023, 1023)):
@@ -862,20 +1006,20 @@ def test_theme_rarity_distribution_regression():
 
 def test_pjsk_birthday_card_renders_single_badge():
     avatar = Image.open(BytesIO(_make_avatar_bytes((32, 160, 240)))).convert("RGBA")
-    theme_data = build_theme_context(
-        "pjsk",
-        {
-            "attribute": "cute",
-            "rarity": "birthday",
-            "training_state": "after_training",
-            "star_count": 4,
-        },
+    payload = {
+        "attribute": "cute",
+        "rarity": "birthday",
+        "training_state": "after_training",
+        "star_count": 4,
+    }
+    spec = pjsk.build_render_spec(payload)
+    with_badge = render_card_by_spec(avatar, spec)
+    without_badge = render_card_by_spec(
+        avatar,
+        replace(spec, overlays=spec.overlays[:-1]),
     )
 
-    with_badge = pjsk.render_card(avatar, theme_data)
-    without_badge = pjsk.render_card(avatar, {**theme_data, "star_render_count": 0})
-
-    scale = int(theme_data["output_size"]) / pjsk.BASE_CANVAS_SIZE
+    scale = int(spec.output_size) / pjsk.BASE_CANVAS_SIZE
     badge_size = round(pjsk.STAR_SIZE * scale)
     inset = max(8, badge_size // 6)
 
@@ -888,7 +1032,10 @@ def test_pjsk_birthday_card_renders_single_badge():
             left + badge_size - inset,
             top + badge_size - inset,
         )
-        diff = ImageChops.difference(with_badge.crop(box), without_badge.crop(box))
+        diff = ImageChops.difference(
+            with_badge.crop(box).convert("RGB"),
+            without_badge.crop(box).convert("RGB"),
+        )
         if index == 0:
             assert diff.getbbox() is not None
         else:
@@ -914,6 +1061,28 @@ def test_build_report_summary():
     assert summary.sea_king == ("1002", 8)
     assert summary.best_match == ("1001", "1003", 6)
     assert summary.yandere == ("1003", "1002", 5)
+
+
+def test_fate_report_renders_psb_png():
+    output = asyncio.run(
+        render_fate_report(
+            FateReport(
+                title="姻缘周刊",
+                scene_id="1000",
+                range_text="2026-04-06 ~ 2026-04-12",
+                cards=(
+                    ReportCard("最海王", "昵称很长的测试用户", "累计被抽到 8 次。", "暂无"),
+                    ReportCard("天作之合", "Alice × Bob", "双向累计 6 次。", "暂无"),
+                    ReportCard("最病娇", None, "", "这段时间还没有出现单向执念。"),
+                ),
+            )
+        )
+    )
+
+    assert output.startswith(b"\x89PNG")
+    with Image.open(BytesIO(output)) as image:
+        assert image.size == (1100, 760)
+        assert image.getpixel((0, 0))[:3] == (255, 240, 245)
 
 
 def test_usage_and_command_cleanup():
@@ -1601,37 +1770,30 @@ def test_get_cp_roster_renders_single_image_with_stable_order(monkeypatch):
 
     captured: dict[str, object] = {}
 
-    async def _fake_render_template_image(template_name: str, context: dict, **kwargs) -> bytes:
-        captured["template_name"] = template_name
-        captured["context"] = context
-        captured["kwargs"] = kwargs
+    async def _fake_render_cp_roster(scene_id: str, pairs: list[RosterPair]) -> bytes:
+        captured["scene_id"] = scene_id
+        captured["pairs"] = pairs
         return b"cp-roster"
 
     monkeypatch.setattr(app_module.member_cache, "ensure_scene", _fake_ensure_scene)
     monkeypatch.setattr(service, "_resolve_display_user", _fake_resolve_display_user)
-    monkeypatch.setattr(app_module, "render_template_image", _fake_render_template_image)
+    monkeypatch.setattr(app_module, "render_cp_roster", _fake_render_cp_roster)
 
     message = asyncio.run(service.get_cp_roster(_make_bot(), "1000"))
 
     assert isinstance(message, UniMessage)
     assert len(message) == 1
     assert list(message)[0].raw == b"cp-roster"
-    assert captured["template_name"] == "cp_roster.html"
-    assert captured["kwargs"] == {
-        "selector": "main",
-        "width": 1000,
-        "height": 740,
-    }
-    assert captured["context"]["columns"] == CP_ROSTER_COLUMNS
-    assert [pair["left_name"] for pair in captured["context"]["pairs"]] == [
+    assert captured["scene_id"] == "1000"
+    assert [pair.left_name for pair in captured["pairs"]] == [
         f"User {index:04d}" for index in range(10)
     ]
-    assert [pair["right_name"] for pair in captured["context"]["pairs"]] == [
+    assert [pair.right_name for pair in captured["pairs"]] == [
         f"User 9{index:03d}" for index in range(10)
     ]
 
 
-def test_get_cp_roster_embeds_avatar_data_uri(monkeypatch):
+def test_get_cp_roster_passes_shared_cache_avatar_refs(monkeypatch):
     from nonebot_plugin_alconna import UniMessage
 
     service = TodayWaifuService()
@@ -1661,45 +1823,73 @@ def test_get_cp_roster_embeds_avatar_data_uri(monkeypatch):
             role_tag=None,
         )
 
-    async def _fake_get_avatar_bytes(url: str) -> bytes:
-        assert url.startswith("https://example.com/")
-        return b"\x89PNG\r\n\x1a\navatar"
-
     captured: dict[str, object] = {}
 
-    async def _fake_render_template_image(template_name: str, context: dict, **kwargs) -> bytes:
-        captured["context"] = context
+    async def _fake_render_cp_roster(scene_id: str, pairs: list[RosterPair]) -> bytes:
+        captured["pairs"] = pairs
         return b"cp-roster"
 
     monkeypatch.setattr(app_module.member_cache, "ensure_scene", _fake_ensure_scene)
     monkeypatch.setattr(service, "_resolve_display_user", _fake_resolve_display_user)
-    monkeypatch.setattr(app_module, "get_avatar_bytes", _fake_get_avatar_bytes)
-    monkeypatch.setattr(app_module, "render_template_image", _fake_render_template_image)
+    monkeypatch.setattr(app_module, "render_cp_roster", _fake_render_cp_roster)
 
     message = asyncio.run(service.get_cp_roster(_make_bot(), "1000"))
 
     assert isinstance(message, UniMessage)
-    pair = captured["context"]["pairs"][0]
-    assert pair["left_avatar"].startswith("data:image/png;base64,")
-    assert pair["right_avatar"].startswith("data:image/png;base64,")
-    assert "https://example.com" not in pair["left_avatar"]
+    pair = captured["pairs"][0]
+    assert pair.left_avatar == AvatarRef("qq", "1001", "https://example.com/1001.png")
+    assert pair.right_avatar == AvatarRef("qq", "2002", "https://example.com/2002.png")
 
 
-def test_cp_roster_template_uses_four_column_safe_layout():
-    template_source = (
-        Path(__file__).resolve().parents[1]
-        / "nonebot_plugin_today_waifu"
-        / "render"
-        / "templates"
-        / "cp_roster.html"
-    ).read_text(encoding="utf-8")
+def test_cp_roster_pillow_layout_is_four_columns_and_dynamic(monkeypatch):
+    pairs = [
+        RosterPair(
+            left_name=f"很长的左侧昵称 {index}",
+            left_avatar=AvatarRef("qq", f"1{index}"),
+            right_name=f"很长的右侧昵称 {index}",
+            right_avatar=AvatarRef("qq", f"2{index}"),
+        )
+        for index in range(5)
+    ]
 
-    assert "{% set columns = columns | default(4) %}" in template_source
-    assert "width: 920px;" in template_source
-    assert "grid-template-columns: repeat({{ columns }}, minmax(0, 1fr));" in template_source
-    assert ".pair {\n      min-width: 0;" in template_source
-    assert ".names {\n      text-align: center;\n      min-width: 0;" in template_source
-    assert ".name-truncate {\n      display: block;\n      min-width: 0;" in template_source
+    async def _missing_avatars(refs: list[AvatarRef]):
+        return {ref: None for ref in refs}
+
+    monkeypatch.setattr(
+        roster_renderer_module,
+        "resolve_avatar_sources",
+        _missing_avatars,
+    )
+
+    output = asyncio.run(render_cp_roster("1000", pairs))
+
+    assert output.startswith(b"\x89PNG")
+    with Image.open(BytesIO(output)) as image:
+        assert image.width == 1000
+        assert image.height > 500
+        assert image.getpixel((0, 0))[:3] == (255, 240, 245)
+        assert image.getpixel((173, 324))[:3] == (255, 102, 153)
+        avatar_colors = image.crop((114, 212, 182, 280)).getcolors(maxcolors=5000)
+        assert avatar_colors is not None
+        assert any(color[:3] == (209, 71, 117) for _, color in avatar_colors)
+
+
+def test_cp_roster_heart_uses_geometry_not_font_glyph():
+    canvas = Image.new("RGBA", (40, 40))
+    draw = ImageDraw.Draw(canvas)
+
+    roster_renderer_module._draw_heart(
+        draw,
+        (20, 12),
+        size=16,
+        fill="#FF6699",
+    )
+
+    assert canvas.getpixel((16, 11)) == (255, 102, 153, 255)
+    assert canvas.getpixel((24, 11)) == (255, 102, 153, 255)
+    assert canvas.getpixel((20, 24)) == (255, 102, 153, 255)
+    assert canvas.getpixel((12, 8))[3] == 0
+    assert canvas.getpixel((28, 8))[3] == 0
 
 
 def test_daily_state_repo_list_paired_scene_orders_by_updated_at_then_id():
@@ -1808,7 +1998,7 @@ def test_pair_counter_repo_adjusts_count_with_upsert():
     asyncio.run(_run())
 
 
-def test_render_user_card_falls_back_on_invalid_theme_payload():
+def test_render_user_card_falls_back_on_invalid_theme_payload(monkeypatch):
     service = TodayWaifuService()
     target = DisplayUser(
         user_id="1001",
@@ -1817,6 +2007,17 @@ def test_render_user_card_falls_back_on_invalid_theme_payload():
         role_tag=None,
     )
 
-    image = asyncio.run(service._render_user_card(target, "pjsk", {"rarity": "4"}))
+    async def _fake_resolve_avatar_source(ref: AvatarRef) -> bytes:
+        return _make_avatar_bytes()
+
+    monkeypatch.setattr(
+        card_renderer_module,
+        "resolve_avatar_source",
+        _fake_resolve_avatar_source,
+    )
+
+    image = asyncio.run(
+        service._render_user_card("qq", target, "pjsk", {"rarity": "4"})
+    )
 
     assert image is None

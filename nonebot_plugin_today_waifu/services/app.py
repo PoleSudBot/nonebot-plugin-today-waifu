@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -8,7 +7,6 @@ from datetime import date, datetime, timedelta
 import random
 from typing import Any
 
-import httpx
 import nonebot
 from nonebot import logger
 from nonebot.adapters import Bot
@@ -31,8 +29,15 @@ from ..constants import (
 )
 from ..member_cache import CachedMember, member_cache
 from ..models import DailyWaifuState, GroupSettings, PairCounter
-from ..render import render_template_image, render_theme_card
-from ..render.runtime import get_avatar_bytes
+from ..render import (
+    AvatarRef,
+    FateReport,
+    ReportCard,
+    RosterPair,
+    render_cp_roster,
+    render_fate_report,
+    render_theme_card,
+)
 from ..repositories import RepoBundle, with_repos
 from ..texts import (
     already_divorced_text,
@@ -54,15 +59,26 @@ from ..texts import (
     repeat_pick_text,
 )
 from ..themes import (
-    build_theme_context,
     build_theme_payload,
     format_theme_keys,
     list_theme_lines,
     parse_theme_selection,
 )
 
-CP_ROSTER_COLUMNS = 4
 PURE_LOVE_PICK_RETRY_LIMIT = 3
+
+
+def _get_platform(bot: Bot) -> str:
+    if isinstance(basic := getattr(bot, "basic", None), dict):
+        platform = str(basic.get("scope") or "unknown").lower()
+        return "qq" if platform.startswith("qq") else platform
+    if interface := get_interface(bot):
+        platform = str(interface.basic_info().get("scope") or "unknown").lower()
+        return "qq" if platform.startswith("qq") else platform
+
+    from zhenxun.utils.platform import PlatformUtils
+
+    return PlatformUtils.get_platform(bot)
 
 
 @dataclass(slots=True)
@@ -529,7 +545,7 @@ class TodayWaifuService:
         if members is None:
             return UniMessage.text(member_query_unavailable_text())
         payload = await self._resolve_today_waifu(bot, session, members)
-        return await self._build_relation_message(payload)
+        return await self._build_relation_message(bot, payload)
 
     async def change_waifu(
         self,
@@ -543,7 +559,7 @@ class TodayWaifuService:
         if members is None:
             return UniMessage.text(member_query_unavailable_text())
         payload = await self._change_waifu(bot, session, members)
-        return await self._build_relation_message(payload)
+        return await self._build_relation_message(bot, payload)
 
     async def divorce(
         self,
@@ -557,28 +573,7 @@ class TodayWaifuService:
         if members is None:
             return UniMessage.text(member_query_unavailable_text())
         payload = await self._divorce(bot, session, members)
-        return await self._build_relation_message(payload)
-
-    def _detect_image_mime(self, data: bytes) -> str:
-        if data.startswith(b"\xff\xd8"):
-            return "image/jpeg"
-        if data.startswith(b"GIF"):
-            return "image/gif"
-        if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
-            return "image/webp"
-        return "image/png"
-
-    async def _avatar_data_uri(self, avatar_url: str | None) -> str | None:
-        if not avatar_url:
-            return None
-        try:
-            avatar_bytes = await get_avatar_bytes(avatar_url)
-        except (httpx.HTTPError, OSError, ValueError) as exc:
-            logger.warning(f"花名册头像加载失败，使用空头像: {exc}")
-            return None
-        mime = self._detect_image_mime(avatar_bytes)
-        encoded = base64.b64encode(avatar_bytes).decode("ascii")
-        return f"data:{mime};base64,{encoded}"
+        return await self._build_relation_message(bot, payload)
 
     async def get_cp_roster(self, bot: Bot, scene_id: str) -> UniMessage:
         members = await member_cache.ensure_scene(bot, scene_id)
@@ -599,32 +594,20 @@ class TodayWaifuService:
         if not pairs:
             return UniMessage.text("今天本群还没有形成任何 CP。")
 
-        pair_context = []
+        platform = _get_platform(bot)
+        pair_context: list[RosterPair] = []
         for user_id, target_id in pairs:
             user = await self._resolve_display_user(bot, scene_id, user_id, members)
             target = await self._resolve_display_user(bot, scene_id, target_id, members)
             pair_context.append(
-                {
-                    "left_name": user.name,
-                    "left_avatar": await self._avatar_data_uri(user.avatar_url),
-                    "right_name": target.name,
-                    "right_avatar": await self._avatar_data_uri(target.avatar_url),
-                }
+                RosterPair(
+                    left_name=user.name,
+                    left_avatar=AvatarRef(platform, user.user_id, user.avatar_url),
+                    right_name=target.name,
+                    right_avatar=AvatarRef(platform, target.user_id, target.avatar_url),
+                )
             )
-        columns = CP_ROSTER_COLUMNS
-        row_count = (len(pair_context) + columns - 1) // columns
-        image = await render_template_image(
-            "cp_roster.html",
-            {
-                "scene_id": scene_id,
-                "pairs": pair_context,
-                "title": "本群 CP 花名册",
-                "columns": columns,
-            },
-            selector="main",
-            width=1000,
-            height=max(480, 260 + row_count * 160),
-        )
+        image = await render_cp_roster(scene_id, pair_context)
         return UniMessage.image(raw=image)
 
     async def get_report(self, bot: Bot, scene_id: str, bucket_type: ReportBucket) -> UniMessage:
@@ -1042,18 +1025,52 @@ class TodayWaifuService:
                 "count": summary.yandere[2],
             }
 
-        return await render_template_image(
-            "fate_report.html",
-            {
-                "title": period.title,
-                "scene_id": scene_id,
-                "range_text": f"{period.start:%Y-%m-%d} ~ {period.end:%Y-%m-%d}",
-                "sea_king": sea_king,
-                "best_match": best_match,
-                "yandere": yandere,
-            },
-            width=1100,
-            height=760,
+        return await render_fate_report(
+            FateReport(
+                title=period.title,
+                scene_id=scene_id,
+                range_text=f"{period.start:%Y-%m-%d} ~ {period.end:%Y-%m-%d}",
+                cards=(
+                    ReportCard(
+                        label="最海王",
+                        value=sea_king["name"] if sea_king else None,
+                        description=(
+                            f"累计被抽到 {sea_king['count']} 次，全场公认的人气王。"
+                            if sea_king
+                            else ""
+                        ),
+                        empty_text="这段时间还没人诞生“海王”称号。",
+                    ),
+                    ReportCard(
+                        label="天作之合",
+                        value=(
+                            f"{best_match['left_name']} × {best_match['right_name']}"
+                            if best_match
+                            else None
+                        ),
+                        description=(
+                            f"双向累计 {best_match['count']} 次，缘分匪浅的搭档。"
+                            if best_match
+                            else ""
+                        ),
+                        empty_text="这段时间还没有稳定的双向奔赴。",
+                    ),
+                    ReportCard(
+                        label="最病娇",
+                        value=(
+                            f"{yandere['left_name']} → {yandere['right_name']}"
+                            if yandere
+                            else None
+                        ),
+                        description=(
+                            f"单向累计抽取 {yandere['count']} 次的执念。"
+                            if yandere
+                            else ""
+                        ),
+                        empty_text="这段时间还没有出现极其夸张的单向执念。",
+                    ),
+                ),
+            )
         )
 
     async def _select_candidate(
@@ -1194,13 +1211,18 @@ class TodayWaifuService:
             return role
         return None
 
-    async def _build_relation_message(self, payload: RelationMessage) -> UniMessage:
+    async def _build_relation_message(
+        self,
+        bot: Bot,
+        payload: RelationMessage,
+    ) -> UniMessage:
         message = UniMessage.text(payload.text)
         if payload.target:
             message += UniMessage.text(
                 f"\n「{payload.target.name}」"
             )
             themed = await self._render_user_card(
+                _get_platform(bot),
                 payload.target,
                 payload.theme_key,
                 payload.theme_payload,
@@ -1215,22 +1237,20 @@ class TodayWaifuService:
 
     async def _render_user_card(
         self,
+        platform: str,
         target: DisplayUser,
         theme_key: str | None,
         theme_payload: dict[str, Any] | None,
     ) -> bytes | None:
-        if not target.avatar_url:
-            return None
         if not theme_key or not theme_payload:
             return None
         try:
-            theme_data = build_theme_context(theme_key, theme_payload)
             return await render_theme_card(
-                target.avatar_url,
+                AvatarRef(platform, target.user_id, target.avatar_url),
                 theme_key,
-                theme_data,
+                theme_payload,
             )
-        except (httpx.HTTPError, OSError, ValueError, KeyError, TypeError) as exc:
+        except (OSError, ValueError, KeyError, TypeError) as exc:
             logger.warning(f"渲染主题卡片失败，回退头像模式: {exc}")
             return None
 

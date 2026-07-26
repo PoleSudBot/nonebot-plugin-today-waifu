@@ -11,6 +11,8 @@ from PIL import Image, ImageChops, ImageDraw, ImageOps
 from PIL.Image import Image as PILImage
 from PIL.Image import Resampling
 
+from zhenxun.utils._build_image import BuildImage
+
 OUTPUT_SIZE = 1024
 MASK_SUPERSAMPLE_SCALE = 4
 
@@ -22,29 +24,25 @@ OverlayResizeMode: TypeAlias = Literal["stretch", "longest_edge", "width"]
 
 
 @dataclass(frozen=True, slots=True)
-class RoundedRectClipSpec:
+class RoundedRectCropSpec:
     box: Rect
     radius: int
     kind: Literal["rounded_rect"] = "rounded_rect"
 
 
 @dataclass(frozen=True, slots=True)
-class FrameWindowClipSpec:
+class ClosedFrameCropSpec:
     frame_path: Path
-    kind: Literal["frame_window"] = "frame_window"
+    kind: Literal["closed_frame"] = "closed_frame"
 
 
 @dataclass(frozen=True, slots=True)
-class MaskClipSpec:
+class MaskCropSpec:
     mask_path: Path
     kind: Literal["mask"] = "mask"
 
 
-CardClipSpec: TypeAlias = (
-    RoundedRectClipSpec
-    | FrameWindowClipSpec
-    | MaskClipSpec
-)
+FinalCropSpec: TypeAlias = RoundedRectCropSpec | ClosedFrameCropSpec | MaskCropSpec
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,9 +60,8 @@ class ThemeCardSpec:
     base_canvas_size: int
     avatar_box: Rect
     output_size: int = OUTPUT_SIZE
-    clip: CardClipSpec | None = None
-    post_clip: CardClipSpec | None = None
     overlays: tuple[OverlaySpec, ...] = ()
+    final_crop: FinalCropSpec | None = None
 
 
 def choose_by_weight(options: tuple[tuple[T, int], ...]) -> T:
@@ -100,7 +97,7 @@ def load_overlay_resized(path: str, width: int, height: int) -> PILImage:
     return load_overlay(path).resize((width, height), Resampling.LANCZOS)
 
 
-def clone_overlay_resized(path: Path, size: tuple[int, int]) -> PILImage:
+def clone_overlay_resized(path: Path, size: Size) -> PILImage:
     return load_overlay_resized(str(path), size[0], size[1]).copy()
 
 
@@ -128,46 +125,52 @@ def clone_overlay_width(path: Path, width: int) -> PILImage:
 
 
 @lru_cache(maxsize=128)
-def load_frame_window_mask(path: str) -> PILImage:
+def load_closed_frame_mask(path: str) -> PILImage:
     alpha = load_overlay(path).getchannel("A")
     width, height = alpha.size
-    solid = [[alpha.getpixel((x, y)) > 0 for x in range(width)] for y in range(height)]
-    outside = [[False] * width for _ in range(height)]
-    queue: deque[Point] = deque()
+    pixel_count = width * height
+    source_alpha = alpha.tobytes()
+    filled_alpha = bytearray(pixel_count)
 
-    for x in range(width):
-        for y in (0, height - 1):
-            if solid[y][x] or outside[y][x]:
-                continue
-            outside[y][x] = True
-            queue.append((x, y))
-    for y in range(height):
-        for x in (0, width - 1):
-            if solid[y][x] or outside[y][x]:
-                continue
-            outside[y][x] = True
-            queue.append((x, y))
+    for threshold in range(1, 256):
+        outside = bytearray(pixel_count)
+        queue: deque[int] = deque()
 
-    while queue:
-        x, y = queue.popleft()
-        for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
-            if not (0 <= nx < width and 0 <= ny < height):
-                continue
-            if solid[ny][nx] or outside[ny][nx]:
-                continue
-            outside[ny][nx] = True
-            queue.append((nx, ny))
+        def enqueue(pixel_index: int) -> None:
+            if source_alpha[pixel_index] < threshold and not outside[pixel_index]:
+                outside[pixel_index] = 1
+                queue.append(pixel_index)
 
-    mask = Image.new("L", (width, height))
-    for y in range(height):
-        for x in range(width):
-            if not solid[y][x] and not outside[y][x]:
-                mask.putpixel((x, y), 255)
-    return mask
+        for x_coordinate in range(width):
+            enqueue(x_coordinate)
+            enqueue((height - 1) * width + x_coordinate)
+        for y_coordinate in range(height):
+            enqueue(y_coordinate * width)
+            enqueue(y_coordinate * width + width - 1)
+
+        while queue:
+            pixel_index = queue.popleft()
+            x_coordinate = pixel_index % width
+            y_coordinate = pixel_index // width
+            if x_coordinate > 0:
+                enqueue(pixel_index - 1)
+            if x_coordinate + 1 < width:
+                enqueue(pixel_index + 1)
+            if y_coordinate > 0:
+                enqueue(pixel_index - width)
+            if y_coordinate + 1 < height:
+                enqueue(pixel_index + width)
+
+        for pixel_index, is_outside in enumerate(outside):
+            if not is_outside:
+                filled_alpha[pixel_index] = threshold
+
+    return Image.frombytes("L", (width, height), bytes(filled_alpha))
 
 
-def clone_frame_window_mask(path: Path) -> PILImage:
-    return load_frame_window_mask(str(path)).copy()
+def clone_closed_frame_mask(path: Path) -> PILImage:
+    return load_closed_frame_mask(str(path)).copy()
+
 
 def fit_size(image: PILImage, size: Size) -> PILImage:
     return ImageOps.fit(
@@ -176,26 +179,6 @@ def fit_size(image: PILImage, size: Size) -> PILImage:
         method=Resampling.LANCZOS,
         centering=(0.5, 0.5),
     )
-
-
-def fit_square(image: PILImage, size: int) -> PILImage:
-    return fit_size(image, (size, size))
-
-
-def resize_longest_edge(image: PILImage, size: int) -> PILImage:
-    copy = image.copy()
-    copy.thumbnail((size, size), Resampling.LANCZOS)
-    return copy
-
-
-def resize_width(image: PILImage, width: int) -> PILImage:
-    ratio = width / image.width
-    height = max(1, round(image.height * ratio))
-    return image.resize((width, height), Resampling.LANCZOS)
-
-
-def paste(base: PILImage, overlay: PILImage, xy: tuple[int, int]) -> None:
-    base.paste(overlay, xy, overlay)
 
 
 def scale_value(value: int, ratio: float) -> int:
@@ -230,7 +213,6 @@ def _build_antialiased_rounded_rect_mask(
     x, y, width, height = box
     left = x * scale
     top = y * scale
-    # Pillow's rectangle bounds are inclusive, so subtract one pixel to preserve width/height.
     right = left + max(1, width * scale) - 1
     bottom = top + max(1, height * scale) - 1
     draw.rounded_rectangle(
@@ -260,51 +242,51 @@ def _resolve_overlay(overlay: OverlaySpec, ratio: float) -> PILImage:
     raise ValueError(f"unknown overlay resize mode: {overlay.resize_mode}")
 
 
-def _build_clip_mask(clip: CardClipSpec, canvas_size: int, ratio: float) -> PILImage:
-    if clip.kind == "rounded_rect":
+def _build_final_crop_mask(
+    crop: FinalCropSpec,
+    canvas_size: int,
+    ratio: float,
+) -> PILImage:
+    if crop.kind == "rounded_rect":
         return _build_antialiased_rounded_rect_mask(
             canvas_size,
-            scale_box(clip.box, ratio),
-            max(0, round(clip.radius * ratio)),
+            scale_box(crop.box, ratio),
+            max(0, round(crop.radius * ratio)),
         )
-    if clip.kind == "frame_window":
-        return clone_frame_window_mask(clip.frame_path).resize(
+    if crop.kind == "closed_frame":
+        return clone_closed_frame_mask(crop.frame_path).resize(
             (canvas_size, canvas_size),
             Resampling.LANCZOS,
         )
-    if clip.kind == "mask":
-        return clone_mask(clip.mask_path).resize(
+    if crop.kind == "mask":
+        return clone_mask(crop.mask_path).resize(
             (canvas_size, canvas_size),
             Resampling.LANCZOS,
         )
-    raise ValueError(f"unknown clip kind: {clip.kind}")
+    raise ValueError(f"unknown final crop kind: {crop.kind}")
 
 
-def _apply_clip_mask(image: PILImage, mask: PILImage) -> None:
-    alpha = ImageChops.multiply(image.getchannel("A"), mask)
-    image.putalpha(alpha)
+def _apply_final_crop(image: PILImage, mask: PILImage) -> None:
+    image.putalpha(ImageChops.multiply(image.getchannel("A"), mask))
 
 
 def render_card_by_spec(avatar: PILImage, spec: ThemeCardSpec) -> PILImage:
     canvas_size = int(spec.output_size)
     ratio = canvas_size / spec.base_canvas_size
-    base = Image.new("RGBA", (canvas_size, canvas_size))
+    build_image = BuildImage(canvas_size, canvas_size, color=(0, 0, 0, 0))
+    canvas = build_image.markImg
 
     avatar_x, avatar_y, avatar_width, avatar_height = scale_box(spec.avatar_box, ratio)
-    avatar_region = fit_size(avatar, (avatar_width, avatar_height))
-    base.paste(avatar_region, (avatar_x, avatar_y), avatar_region)
-
-    if spec.clip is not None:
-        mask = _build_clip_mask(spec.clip, canvas_size, ratio)
-        _apply_clip_mask(base, mask)
+    avatar_region = fit_size(avatar.convert("RGBA"), (avatar_width, avatar_height))
+    canvas.alpha_composite(avatar_region, (avatar_x, avatar_y))
 
     for overlay in spec.overlays:
         image = _resolve_overlay(overlay, ratio)
         for position in overlay.positions:
-            paste(base, image, scale_point(position, ratio))
+            canvas.alpha_composite(image, scale_point(position, ratio))
 
-    if spec.post_clip is not None:
-        mask = _build_clip_mask(spec.post_clip, canvas_size, ratio)
-        _apply_clip_mask(base, mask)
+    if spec.final_crop is not None:
+        mask = _build_final_crop_mask(spec.final_crop, canvas_size, ratio)
+        _apply_final_crop(canvas, mask)
 
-    return base
+    return canvas
